@@ -33,11 +33,21 @@ def read_session(salt: str, token: str, max_age_seconds: int) -> dict | None:
 
 
 def cookie_kwargs(*, max_age_seconds: int) -> dict:
+    """Frontend and API are on different registrable domains in every
+    non-local environment (Vercel/custom domain vs *.fly.dev), which makes
+    every request cross-site rather than merely cross-origin. Browsers will
+    not send/accept SameSite=Lax cookies on cross-site fetch/XHR, so those
+    environments need SameSite=None (which itself requires Secure). Locally,
+    frontend and API differ only by port on localhost -- same "site" per the
+    registrable-domain definition -- so Lax works and lets cookies flow over
+    plain http during dev.
+    """
     settings = get_settings()
+    cross_site = settings.env != "local"
     return {
         "httponly": True,
-        "secure": settings.env != "local",
-        "samesite": "lax",
+        "secure": cross_site,
+        "samesite": "none" if cross_site else "lax",
         "max_age": max_age_seconds,
         "path": "/",
     }
