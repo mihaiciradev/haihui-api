@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     # Email (Resend)
     resend_api_key: str = Field(default="", alias="RESEND_API_KEY")
     email_from: str = Field(default="HaiHui <no-reply@haihui.ro>", alias="EMAIL_FROM")
+    email_reply_to: str = Field(default="", alias="EMAIL_REPLY_TO")
 
     # Stripe
     stripe_secret_key: str = Field(default="", alias="STRIPE_SECRET_KEY")

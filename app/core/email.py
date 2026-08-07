@@ -44,11 +44,15 @@ async def send_email(
         log.status = EmailStatus.sent
         return log
 
+    payload = {"from": settings.email_from, "to": [to], "subject": subject, "html": html}
+    if settings.email_reply_to:
+        payload["reply_to"] = settings.email_reply_to
+
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
             RESEND_API_URL,
             headers={"Authorization": f"Bearer {settings.resend_api_key}"},
-            json={"from": settings.email_from, "to": [to], "subject": subject, "html": html},
+            json=payload,
         )
     if resp.status_code >= 400:
         log.status = EmailStatus.failed
