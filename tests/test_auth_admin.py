@@ -1,4 +1,4 @@
-from datetime import UTC
+from datetime import UTC, datetime
 
 import pyotp
 
@@ -8,8 +8,6 @@ from app.models.user import User
 
 
 async def test_admin_login_requires_totp_step(client, db):
-    from datetime import datetime
-
     secret = generate_totp_secret()
     admin = User(
         email="admin@haihui.ro",
@@ -54,8 +52,6 @@ async def test_admin_login_rejects_account_without_totp_confirmed(client, db):
 
 
 async def test_admin_login_rejects_wrong_password(client, db):
-    from datetime import datetime
-
     admin = User(
         email="admin2@haihui.ro",
         is_admin=True,
@@ -70,3 +66,74 @@ async def test_admin_login_rejects_wrong_password(client, db):
         "/admin/auth/login", json={"email": "admin2@haihui.ro", "password": "wrongpass"}
     )
     assert resp.status_code == 401
+
+
+async def _create_confirmed_admin(db, email: str, password: str) -> str:
+    secret = generate_totp_secret()
+    admin = User(
+        email=email,
+        is_admin=True,
+        admin_password_hash=hash_secret(password),
+        admin_totp_secret=secret,
+        admin_totp_confirmed_at=datetime.now(UTC),
+    )
+    db.add(admin)
+    await db.commit()
+    return secret
+
+
+async def test_admin_me_requires_session(client):
+    resp = await client.get("/admin/me")
+    assert resp.status_code == 401
+
+
+async def test_admin_me_returns_identity_after_full_login(client, db):
+    secret = await _create_confirmed_admin(db, "me-check@haihui.ro", "supersecret1")
+
+    login = await client.post(
+        "/admin/auth/login", json={"email": "me-check@haihui.ro", "password": "supersecret1"}
+    )
+    assert login.status_code == 200
+
+    verify = await client.post(
+        "/admin/auth/totp/verify", json={"code": pyotp.TOTP(secret).now()}
+    )
+    assert verify.status_code == 200
+
+    me = await client.get("/admin/me")
+    assert me.status_code == 200
+    assert me.json()["email"] == "me-check@haihui.ro"
+
+
+async def test_admin_me_rejects_pending_only_session(client, db):
+    await _create_confirmed_admin(db, "pending-only@haihui.ro", "supersecret1")
+
+    login = await client.post(
+        "/admin/auth/login", json={"email": "pending-only@haihui.ro", "password": "supersecret1"}
+    )
+    assert login.status_code == 200
+    assert "hh_admin_pending" in login.cookies
+
+    # Only the pending 2FA cookie exists -- /admin/me must not treat that as
+    # a real session.
+    me = await client.get("/admin/me")
+    assert me.status_code == 401
+
+
+async def test_admin_totp_locks_out_after_five_failures(client, db):
+    secret = await _create_confirmed_admin(db, "lockout@haihui.ro", "supersecret1")
+
+    login = await client.post(
+        "/admin/auth/login", json={"email": "lockout@haihui.ro", "password": "supersecret1"}
+    )
+    assert login.status_code == 200
+
+    for _ in range(5):
+        resp = await client.post("/admin/auth/totp/verify", json={"code": "000000"})
+        assert resp.status_code == 401
+
+    # 6th attempt, even with the correct code, must be locked out.
+    resp = await client.post(
+        "/admin/auth/totp/verify", json={"code": pyotp.TOTP(secret).now()}
+    )
+    assert resp.status_code == 423

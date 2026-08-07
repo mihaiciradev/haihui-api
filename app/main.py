@@ -33,7 +33,9 @@ app.add_middleware(
 
 app.include_router(auth_traveler.router)
 app.include_router(auth_staff.router)
+app.include_router(auth_staff.me_router)
 app.include_router(auth_admin.router)
+app.include_router(auth_admin.me_router)
 
 
 @app.get("/healthz")

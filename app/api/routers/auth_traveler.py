@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 
-from app.api.deps import DbSession
+from app.api.deps import DbSession, TravelerIdentity, get_current_traveler
 from app.config import get_settings
 from app.core.email import send_email
 from app.core.events import write_event
@@ -99,3 +99,14 @@ async def verify_magic_link(
 async def logout(response: Response) -> dict:
     response.delete_cookie(TRAVELER_COOKIE, path="/")
     return {"status": "ok"}
+
+
+@router.get("/me")
+async def get_me(
+    db: DbSession, identity: TravelerIdentity = Depends(get_current_traveler)  # noqa: B008
+) -> dict:
+    result = await db.execute(select(User).where(User.id == identity.user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired")
+    return {"user_id": str(user.id), "email": user.email, "locale": user.locale.value}

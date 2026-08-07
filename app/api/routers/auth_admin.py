@@ -1,9 +1,10 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Cookie, HTTPException, Request, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 
-from app.api.deps import DbSession
+from app.api.deps import AdminIdentity, DbSession, get_current_admin
 from app.config import get_settings
 from app.core.events import write_event
 from app.core.http import client_ip
@@ -16,6 +17,7 @@ from app.models.user import User
 from app.schemas.auth import AdminLoginRequest, AdminTotpVerifyRequest
 
 router = APIRouter(prefix="/admin/auth", tags=["admin-auth"])
+me_router = APIRouter(prefix="/admin", tags=["admin-auth"])
 
 PENDING_2FA_COOKIE = "hh_admin_pending"
 PENDING_2FA_TTL_SECONDS = 5 * 60
@@ -75,7 +77,18 @@ async def admin_totp_verify(
     if admin is None or not admin.admin_totp_secret:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login again")
 
+    settings = get_settings()
+    if admin.admin_totp_locked_until is not None and admin.admin_totp_locked_until > datetime.now(
+        UTC
+    ):
+        raise HTTPException(status.HTTP_423_LOCKED, "Too many attempts, try again later")
+
     if not verify_totp(admin.admin_totp_secret, body.code):
+        admin.admin_failed_totp_attempts += 1
+        if admin.admin_failed_totp_attempts >= settings.pin_max_attempts:
+            admin.admin_totp_locked_until = datetime.now(UTC) + timedelta(
+                minutes=settings.pin_lockout_minutes
+            )
         await write_event(
             db,
             actor_type=ActorType.system,
@@ -88,7 +101,9 @@ async def admin_totp_verify(
         await db.commit()
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid code")
 
-    settings = get_settings()
+    admin.admin_failed_totp_attempts = 0
+    admin.admin_totp_locked_until = None
+
     session_token = issue_session("admin", {"admin_user_id": str(admin.id), "totp_verified": True})
     response.set_cookie(
         ADMIN_COOKIE,
@@ -114,3 +129,16 @@ async def admin_totp_verify(
 async def admin_logout(response: Response) -> dict:
     response.delete_cookie(ADMIN_COOKIE, path="/")
     return {"status": "ok"}
+
+
+@me_router.get("/me")
+async def get_me(
+    db: DbSession, identity: AdminIdentity = Depends(get_current_admin)  # noqa: B008
+) -> dict:
+    result = await db.execute(
+        select(User).where(User.id == identity.admin_user_id, User.is_admin.is_(True))
+    )
+    admin = result.scalar_one_or_none()
+    if admin is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired")
+    return {"admin_user_id": str(admin.id), "email": admin.email}

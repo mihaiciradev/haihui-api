@@ -69,3 +69,27 @@ async def test_magic_link_verify_rejects_reused_token(client, db):
 
     second = await client.post("/auth/magic-link/verify", json={"token": raw})
     assert second.status_code == 400
+
+
+async def test_me_requires_session(client):
+    resp = await client.get("/auth/me")
+    assert resp.status_code == 401
+
+
+async def test_me_returns_identity_after_login(client, db):
+    raw, hashed = generate_opaque_token()
+    db.add(
+        MagicLinkToken(
+            email="me-check@example.com",
+            token_hash=hashed,
+            expires_at=datetime.now(UTC) + timedelta(minutes=15),
+        )
+    )
+    await db.commit()
+
+    verify = await client.post("/auth/magic-link/verify", json={"token": raw})
+    assert verify.status_code == 200
+
+    me = await client.get("/auth/me")
+    assert me.status_code == 200
+    assert me.json()["email"] == "me-check@example.com"

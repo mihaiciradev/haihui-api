@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 
-from app.api.deps import DbSession
+from app.api.deps import DbSession, StaffIdentity, get_current_staff
 from app.config import get_settings
 from app.core.events import write_event
 from app.core.http import client_ip
@@ -15,6 +15,7 @@ from app.models.staff import LocationLoginToken, StaffMember
 from app.schemas.auth import StaffLoginRequest, StaffRosterRequest
 
 router = APIRouter(prefix="/partner/auth", tags=["partner-auth"])
+me_router = APIRouter(prefix="/partner", tags=["partner-auth"])
 
 
 def _locked(entity) -> bool:
@@ -136,3 +137,19 @@ async def staff_login(
 async def staff_logout(response: Response) -> dict:
     response.delete_cookie(STAFF_COOKIE, path="/")
     return {"status": "ok"}
+
+
+@me_router.get("/me")
+async def get_me(
+    db: DbSession, identity: StaffIdentity = Depends(get_current_staff)  # noqa: B008
+) -> dict:
+    result = await db.execute(select(StaffMember).where(StaffMember.id == identity.staff_id))
+    staff = result.scalar_one_or_none()
+    if staff is None or not staff.is_active:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired")
+    return {
+        "staff_id": str(staff.id),
+        "location_id": str(staff.location_id),
+        "role": staff.role.value,
+        "name": staff.name,
+    }

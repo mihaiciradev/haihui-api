@@ -93,3 +93,25 @@ async def test_staff_login_rejects_unknown_location_token(client):
         },
     )
     assert resp.status_code == 401
+
+
+async def test_partner_me_requires_session(client):
+    resp = await client.get("/partner/me")
+    assert resp.status_code == 401
+
+
+async def test_partner_me_returns_identity_after_login(client, db):
+    raw_token, staff = await _seed_location_with_staff(db, pin="1234")
+
+    login = await client.post(
+        "/partner/auth/login",
+        json={"location_token": raw_token, "staff_id": str(staff.id), "pin": "1234"},
+    )
+    assert login.status_code == 200
+
+    me = await client.get("/partner/me")
+    assert me.status_code == 200
+    body = me.json()
+    assert body["staff_id"] == str(staff.id)
+    assert body["name"] == "Ana"
+    assert body["role"] == "staff"

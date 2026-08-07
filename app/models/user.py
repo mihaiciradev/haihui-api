@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import Boolean, DateTime, SmallInteger, String
 from sqlalchemy.dialects.postgresql import CITEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,3 +30,9 @@ class User(Base, UUIDPKMixin, TimestampMixin):
     admin_password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     admin_totp_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
     admin_totp_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # §3.2-style lockout mirrored onto TOTP: 5 wrong codes -> 15 min lock.
+    admin_failed_totp_attempts: Mapped[int] = mapped_column(
+        SmallInteger, default=0, nullable=False
+    )
+    admin_totp_locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
