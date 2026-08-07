@@ -19,8 +19,13 @@ def check_rate_limit(key: str, *, max_attempts: int, window_seconds: int) -> Non
     hits = _buckets[key]
     hits[:] = [t for t in hits if t > window_start]
     if len(hits) >= max_attempts:
+        retry_after = max(1, round(window_seconds - (now - hits[0])))
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many requests. Please try again later.",
+            detail={
+                "message": "Too many requests. Please try again later.",
+                "retry_after_seconds": retry_after,
+            },
+            headers={"Retry-After": str(retry_after)},
         )
     hits.append(now)

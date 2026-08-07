@@ -22,6 +22,20 @@ def _locked(entity) -> bool:
     return entity.locked_until is not None and entity.locked_until > datetime.now(UTC)
 
 
+def _raise_locked(entity, *, scope: str) -> None:
+    retry_after = max(1, round((entity.locked_until - datetime.now(UTC)).total_seconds()))
+    raise HTTPException(
+        status_code=status.HTTP_423_LOCKED,
+        detail={
+            "message": "Too many attempts, try again later",
+            "scope": scope,  # "staff" or "location" -- which one is locked
+            "retry_after_seconds": retry_after,
+            "locked_until": entity.locked_until.isoformat(),
+        },
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 async def _resolve_location_token(db: DbSession, raw_token: str) -> LocationLoginToken:
     token_hash = hash_opaque_token(raw_token)
     result = await db.execute(
@@ -42,7 +56,7 @@ async def staff_roster(body: StaffRosterRequest, request: Request, db: DbSession
     check_rate_limit(f"staff-roster:ip:{client_ip(request)}", max_attempts=30, window_seconds=900)
     login_token = await _resolve_location_token(db, body.location_token)
     if _locked(login_token):
-        raise HTTPException(status.HTTP_423_LOCKED, "Location locked out, try again later")
+        _raise_locked(login_token, scope="location")
 
     result = await db.execute(
         select(StaffMember).where(
@@ -62,8 +76,6 @@ async def staff_login(
     check_rate_limit(f"staff-login:ip:{client_ip(request)}", max_attempts=20, window_seconds=900)
 
     login_token = await _resolve_location_token(db, body.location_token)
-    if _locked(login_token):
-        raise HTTPException(status.HTTP_423_LOCKED, "Location locked out, try again later")
 
     result = await db.execute(
         select(StaffMember).where(
@@ -74,10 +86,18 @@ async def staff_login(
     )
     staff = result.scalar_one_or_none()
     if staff is None:
+        if _locked(login_token):
+            _raise_locked(login_token, scope="location")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid PIN")
 
+    # Check the more specific scope first: if this staff member individually
+    # tripped their own lockout, say so even though the location counter
+    # (incremented on every failed attempt regardless of who made it) is
+    # very likely to have also crossed the threshold at the same moment.
     if _locked(staff):
-        raise HTTPException(status.HTTP_423_LOCKED, "Too many attempts, try again later")
+        _raise_locked(staff, scope="staff")
+    if _locked(login_token):
+        _raise_locked(login_token, scope="location")
 
     if not verify_secret(body.pin, staff.pin_hash):
         staff.failed_pin_attempts += 1

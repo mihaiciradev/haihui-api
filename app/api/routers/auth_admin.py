@@ -23,6 +23,17 @@ PENDING_2FA_COOKIE = "hh_admin_pending"
 PENDING_2FA_TTL_SECONDS = 5 * 60
 
 
+def _pending_expired() -> HTTPException:
+    """Distinct from a wrong TOTP code: the pending-2FA cookie is missing or
+    expired, so the frontend should reset to the credentials step rather than
+    retry the code entry.
+    """
+    return HTTPException(
+        status.HTTP_401_UNAUTHORIZED,
+        detail={"message": "Login again", "reason": "pending_expired"},
+    )
+
+
 @router.post("/login")
 async def admin_login(
     body: AdminLoginRequest, request: Request, response: Response, db: DbSession
@@ -64,10 +75,10 @@ async def admin_totp_verify(
     check_rate_limit(f"admin-totp:ip:{client_ip(request)}", max_attempts=10, window_seconds=900)
 
     if not hh_admin_pending:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login again")
+        raise _pending_expired()
     data = read_session("admin-pending", hh_admin_pending, PENDING_2FA_TTL_SECONDS)
     if not data:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login again")
+        raise _pending_expired()
 
     admin_id = uuid.UUID(data["admin_user_id"])
     admin_result = await db.execute(
@@ -75,13 +86,24 @@ async def admin_totp_verify(
     )
     admin = admin_result.scalar_one_or_none()
     if admin is None or not admin.admin_totp_secret:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login again")
+        raise _pending_expired()
 
     settings = get_settings()
     if admin.admin_totp_locked_until is not None and admin.admin_totp_locked_until > datetime.now(
         UTC
     ):
-        raise HTTPException(status.HTTP_423_LOCKED, "Too many attempts, try again later")
+        retry_after = max(
+            1, round((admin.admin_totp_locked_until - datetime.now(UTC)).total_seconds())
+        )
+        raise HTTPException(
+            status.HTTP_423_LOCKED,
+            detail={
+                "message": "Too many attempts, try again later",
+                "retry_after_seconds": retry_after,
+                "locked_until": admin.admin_totp_locked_until.isoformat(),
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
 
     if not verify_totp(admin.admin_totp_secret, body.code):
         admin.admin_failed_totp_attempts += 1
@@ -99,7 +121,10 @@ async def admin_totp_verify(
             ip=client_ip(request),
         )
         await db.commit()
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid code")
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            detail={"message": "Invalid code", "reason": "invalid_code"},
+        )
 
     admin.admin_failed_totp_attempts = 0
     admin.admin_totp_locked_until = None

@@ -137,3 +137,26 @@ async def test_admin_totp_locks_out_after_five_failures(client, db):
         "/admin/auth/totp/verify", json={"code": pyotp.TOTP(secret).now()}
     )
     assert resp.status_code == 423
+    body = resp.json()["detail"]
+    assert 800 <= body["retry_after_seconds"] <= 900
+    assert resp.headers["retry-after"] == str(body["retry_after_seconds"])
+    assert "locked_until" in body
+
+
+async def test_admin_totp_verify_distinguishes_expired_pending_from_wrong_code(client, db):
+    await _create_confirmed_admin(db, "reason-check@haihui.ro", "supersecret1")
+
+    # No pending cookie at all -- distinct reason so the frontend can reset
+    # to the credentials step instead of showing "wrong code".
+    resp = await client.post("/admin/auth/totp/verify", json={"code": "000000"})
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["reason"] == "pending_expired"
+
+    login = await client.post(
+        "/admin/auth/login", json={"email": "reason-check@haihui.ro", "password": "supersecret1"}
+    )
+    assert login.status_code == 200
+
+    wrong = await client.post("/admin/auth/totp/verify", json={"code": "000000"})
+    assert wrong.status_code == 401
+    assert wrong.json()["detail"]["reason"] == "invalid_code"
