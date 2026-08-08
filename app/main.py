@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routers import auth_admin, auth_staff, auth_traveler
+from app.api.routers import admin_locations, auth_admin, auth_staff, auth_traveler, partner_location
 from app.config import get_settings
 from app.core.middleware import SecurityHeadersMiddleware
 
@@ -36,6 +36,8 @@ app.include_router(auth_staff.router)
 app.include_router(auth_staff.me_router)
 app.include_router(auth_admin.router)
 app.include_router(auth_admin.me_router)
+app.include_router(admin_locations.router)
+app.include_router(partner_location.router)
 
 
 @app.get("/healthz")
