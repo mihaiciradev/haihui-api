@@ -1,6 +1,7 @@
 import re
 import secrets
-from datetime import time
+import uuid
+from datetime import UTC, datetime, time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -19,8 +20,15 @@ from app.schemas.location import (
     LocationCreateResponse,
     LocationSummary,
 )
+from app.schemas.staff import (
+    PinResetRequest,
+    StaffCreateRequest,
+    StaffCreateResponse,
+    TokenRotateResponse,
+)
 
 router = APIRouter(prefix="/admin/locations", tags=["admin-locations"])
+staff_router = APIRouter(prefix="/admin/staff", tags=["admin-locations"])
 
 _DEFAULT_OPEN = time(8, 0)
 _DEFAULT_CLOSE = time(20, 0)
@@ -156,3 +164,119 @@ async def list_locations(
         )
         for loc, city_slug in result.all()
     ]
+
+
+@router.post(
+    "/{location_id}/staff",
+    response_model=StaffCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_staff(
+    location_id: uuid.UUID,
+    body: StaffCreateRequest,
+    request: Request,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> StaffCreateResponse:
+    """Location creation only sets up the first owner login -- real
+    businesses need more than one staff member so scans stay attributable
+    to a specific person (§3.2), hence this separate endpoint.
+    """
+    location_result = await db.execute(select(Location.id).where(Location.id == location_id))
+    if location_result.scalar_one_or_none() is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
+
+    staff = StaffMember(
+        location_id=location_id,
+        name=body.name,
+        pin_hash=hash_secret(body.pin),
+        role=body.role,
+    )
+    db.add(staff)
+    await db.flush()
+
+    await write_event(
+        db,
+        actor_type=ActorType.admin,
+        actor_id=admin.admin_user_id,
+        entity_type="staff_member",
+        entity_id=staff.id,
+        action="staff_added",
+        payload={"location_id": str(location_id), "role": body.role.value},
+        ip=client_ip(request),
+    )
+    await db.commit()
+    return StaffCreateResponse(staff_id=str(staff.id), name=staff.name, role=staff.role.value)
+
+
+@staff_router.post("/{staff_id}/reset-pin", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_staff_pin(
+    staff_id: uuid.UUID,
+    body: PinResetRequest,
+    request: Request,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> None:
+    """§3.2: 'PIN reset only via admin' -- also clears any active lockout,
+    since a forgotten-PIN reset should unstick the account too.
+    """
+    result = await db.execute(select(StaffMember).where(StaffMember.id == staff_id))
+    staff = result.scalar_one_or_none()
+    if staff is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Staff member not found")
+
+    staff.pin_hash = hash_secret(body.new_pin)
+    staff.failed_pin_attempts = 0
+    staff.locked_until = None
+
+    await write_event(
+        db,
+        actor_type=ActorType.admin,
+        actor_id=admin.admin_user_id,
+        entity_type="staff_member",
+        entity_id=staff.id,
+        action="pin_reset",
+        ip=client_ip(request),
+    )
+    await db.commit()
+
+
+@router.post("/{location_id}/rotate-token", response_model=TokenRotateResponse)
+async def rotate_location_token(
+    location_id: uuid.UUID,
+    request: Request,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> TokenRotateResponse:
+    """§3.2: 'admin can rotate a location's login token instantly if a card
+    leaks'. Revokes every currently-active token for the location and issues
+    a fresh one -- the old QR card stops working the moment this runs.
+    """
+    location_result = await db.execute(select(Location.id).where(Location.id == location_id))
+    if location_result.scalar_one_or_none() is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
+
+    active_tokens = await db.execute(
+        select(LocationLoginToken).where(
+            LocationLoginToken.location_id == location_id,
+            LocationLoginToken.revoked_at.is_(None),
+        )
+    )
+    now = datetime.now(UTC)
+    for token in active_tokens.scalars().all():
+        token.revoked_at = now
+
+    raw_token, token_hash = generate_opaque_token()
+    db.add(LocationLoginToken(location_id=location_id, token_hash=token_hash))
+
+    await write_event(
+        db,
+        actor_type=ActorType.admin,
+        actor_id=admin.admin_user_id,
+        entity_type="location",
+        entity_id=location_id,
+        action="login_token_rotated",
+        ip=client_ip(request),
+    )
+    await db.commit()
+    return TokenRotateResponse(location_login_token=raw_token)

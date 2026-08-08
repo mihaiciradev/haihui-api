@@ -32,6 +32,9 @@ async def _create_admin_and_login(client, db, email="admin@haihui.ro") -> None:
     assert verify.status_code == 200
 
 
+NIL_UUID = "00000000-0000-0000-0000-000000000000"
+
+
 async def _seed_city(db, slug="brasov") -> City:
     city = City(slug=slug, name_ro="Brașov", name_en="Brasov")
     db.add(city)
@@ -153,3 +156,191 @@ async def test_list_locations_returns_created_locations(client, db):
     assert resp.status_code == 200
     names = [loc["name"] for loc in resp.json()]
     assert "Suvenire Test" in names
+
+
+async def test_add_staff_requires_admin_session(client):
+    resp = await client.post(
+        f"/admin/locations/{NIL_UUID}/staff",
+        json={"name": "New Staff", "pin": "5678"},
+    )
+    assert resp.status_code == 401
+
+
+async def test_add_staff_happy_path_and_can_log_in(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    resp = await client.post(
+        f"/admin/locations/{created['id']}/staff",
+        json={"name": "New Staff", "pin": "5678"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["name"] == "New Staff"
+    assert body["role"] == "staff"
+
+    roster = await client.post(
+        "/partner/auth/roster", json={"location_token": created["location_login_token"]}
+    )
+    names = [s["name"] for s in roster.json()["staff"]]
+    assert "New Staff" in names
+    assert "Owner Test" in names
+
+    login = await client.post(
+        "/partner/auth/login",
+        json={
+            "location_token": created["location_login_token"],
+            "staff_id": body["staff_id"],
+            "pin": "5678",
+        },
+    )
+    assert login.status_code == 200
+
+
+async def test_add_staff_rejects_unknown_location(client, db):
+    await _create_admin_and_login(client, db)
+    resp = await client.post(
+        f"/admin/locations/{NIL_UUID}/staff",
+        json={"name": "New Staff", "pin": "5678"},
+    )
+    assert resp.status_code == 404
+
+
+async def test_reset_pin_requires_admin_session(client):
+    resp = await client.post(
+        f"/admin/staff/{NIL_UUID}/reset-pin",
+        json={"new_pin": "4321"},
+    )
+    assert resp.status_code == 401
+
+
+async def test_reset_pin_lets_staff_log_in_with_new_pin(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    result = await db.execute(select(StaffMember).where(StaffMember.location_id == created["id"]))
+    owner = result.scalar_one()
+
+    resp = await client.post(
+        f"/admin/staff/{owner.id}/reset-pin", json={"new_pin": "4321"}
+    )
+    assert resp.status_code == 204
+
+    old_pin_login = await client.post(
+        "/partner/auth/login",
+        json={
+            "location_token": created["location_login_token"],
+            "staff_id": str(owner.id),
+            "pin": "1234",
+        },
+    )
+    assert old_pin_login.status_code == 401
+
+    new_pin_login = await client.post(
+        "/partner/auth/login",
+        json={
+            "location_token": created["location_login_token"],
+            "staff_id": str(owner.id),
+            "pin": "4321",
+        },
+    )
+    assert new_pin_login.status_code == 200
+
+
+async def test_reset_pin_clears_staff_lockout_but_not_location_lockout(client, db):
+    """Reset-pin is a narrow, staff-scoped admin action (§3.2). In this
+    single-staff scenario, 5 fails also trip the shared location-token
+    counter (same root cause as the earlier scope-priority fix) -- that's a
+    separate signal reset-pin deliberately does not touch, since a PIN reset
+    for one person shouldn't silently clear a location-wide lockout that may
+    be catching unrelated activity. Full recovery needs rotate-token too.
+    """
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    result = await db.execute(select(StaffMember).where(StaffMember.location_id == created["id"]))
+    owner = result.scalar_one()
+
+    for _ in range(5):
+        await client.post(
+            "/partner/auth/login",
+            json={
+                "location_token": created["location_login_token"],
+                "staff_id": str(owner.id),
+                "pin": "9999",
+            },
+        )
+    locked_check = await client.post(
+        "/partner/auth/login",
+        json={
+            "location_token": created["location_login_token"],
+            "staff_id": str(owner.id),
+            "pin": "1234",
+        },
+    )
+    assert locked_check.status_code == 423
+
+    reset = await client.post(f"/admin/staff/{owner.id}/reset-pin", json={"new_pin": "1234"})
+    assert reset.status_code == 204
+
+    await db.refresh(owner)
+    assert owner.failed_pin_attempts == 0
+    assert owner.locked_until is None
+
+    # Location-level lock is untouched by reset-pin -- login is still 423.
+    still_locked = await client.post(
+        "/partner/auth/login",
+        json={
+            "location_token": created["location_login_token"],
+            "staff_id": str(owner.id),
+            "pin": "1234",
+        },
+    )
+    assert still_locked.status_code == 423
+    assert still_locked.json()["detail"]["scope"] == "location"
+
+    # Full recovery: admin also rotates the location token.
+    rotated = await client.post(f"/admin/locations/{created['id']}/rotate-token")
+    assert rotated.status_code == 200
+
+    login = await client.post(
+        "/partner/auth/login",
+        json={
+            "location_token": rotated.json()["location_login_token"],
+            "staff_id": str(owner.id),
+            "pin": "1234",
+        },
+    )
+    assert login.status_code == 200
+
+
+async def test_rotate_token_requires_admin_session(client):
+    resp = await client.post(f"/admin/locations/{NIL_UUID}/rotate-token")
+    assert resp.status_code == 401
+
+
+async def test_rotate_token_invalidates_old_and_issues_new(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+    old_token = created["location_login_token"]
+
+    resp = await client.post(f"/admin/locations/{created['id']}/rotate-token")
+    assert resp.status_code == 200
+    new_token = resp.json()["location_login_token"]
+    assert new_token != old_token
+
+    old_roster = await client.post("/partner/auth/roster", json={"location_token": old_token})
+    assert old_roster.status_code == 401
+
+    new_roster = await client.post("/partner/auth/roster", json={"location_token": new_token})
+    assert new_roster.status_code == 200
+
+
+async def test_rotate_token_rejects_unknown_location(client, db):
+    await _create_admin_and_login(client, db)
+    resp = await client.post(f"/admin/locations/{NIL_UUID}/rotate-token")
+    assert resp.status_code == 404
