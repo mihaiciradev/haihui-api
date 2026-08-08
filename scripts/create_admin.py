@@ -23,8 +23,11 @@ async def main(email: str) -> None:
         raise SystemExit("Password too short")
 
     totp_secret = generate_totp_secret()
-    print("Scan this into an authenticator app now:")
-    print(totp_provisioning_uri(totp_secret, email))
+    print("Add this to an authenticator app now (Google Authenticator, Authy, 1Password, etc.):")
+    print(f"  Manual entry key (time-based/TOTP): {totp_secret}")
+    print(f"  Account name: {email}")
+    print("  (or, if your app can import a link/QR from a URI:)")
+    print(f"  {totp_provisioning_uri(totp_secret, email)}")
 
     code = input("Enter the 6-digit code from the app to confirm enrollment: ").strip()
     if not verify_totp(totp_secret, code):
