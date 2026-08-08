@@ -1,8 +1,9 @@
-"""Frontend and API are on different registrable domains in every deployed
-environment (custom domain vs *.fly.dev), so session cookies must be
-SameSite=None; Secure there -- SameSite=Lax silently drops the cookie on
-cross-site fetch/XHR, which looks like "requests succeed but the user is
-never logged in" rather than a loud error.
+"""The API is served from api.haihuistorage.ro, a subdomain of the same
+registrable domain as the frontend (www.haihuistorage.ro), so session
+cookies are same-site in every environment -- SameSite=Lax works everywhere,
+and is required to avoid browsers' third-party-cookie blocking silently
+dropping the cookie (that blocking is keyed on registrable domain, not on
+the SameSite attribute itself).
 """
 
 from unittest.mock import patch
@@ -19,10 +20,10 @@ def test_local_env_uses_lax_and_insecure():
     assert kwargs["secure"] is False
 
 
-def test_non_local_env_uses_none_and_secure():
+def test_non_local_env_uses_lax_and_secure():
     settings = get_settings()
     for env in ("staging", "production"):
         with patch.object(settings, "env", env):
             kwargs = cookie_kwargs(max_age_seconds=60)
-        assert kwargs["samesite"] == "none", f"env={env}"
+        assert kwargs["samesite"] == "lax", f"env={env}"
         assert kwargs["secure"] is True, f"env={env}"
