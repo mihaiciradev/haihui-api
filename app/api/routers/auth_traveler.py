@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.api.deps import DbSession, TravelerIdentity, get_current_traveler
 from app.config import get_settings
 from app.core.email import send_email
+from app.core.email_templates import render_email
 from app.core.events import write_event
 from app.core.http import client_ip
 from app.core.rate_limit import check_rate_limit
@@ -30,14 +31,26 @@ async def request_magic_link(body: MagicLinkRequest, request: Request, db: DbSes
     db.add(MagicLinkToken(email=body.email, token_hash=hashed, expires_at=expires_at))
 
     link = f"{settings.public_base_url}/auth/verify?token={raw}"
-    html = (
-        f'<p>Click to log in: <a href="{link}">{link}</a></p>'
-        f"<p>Expires in {settings.magic_link_ttl_minutes} minutes.</p>"
+    body_html = (
+        "<p>Salut!</p>"
+        "<p>Apasă butonul de mai jos pentru a te conecta la contul tău HaiHui – Storage. "
+        f"Linkul este valabil <strong>{settings.magic_link_ttl_minutes} minute</strong> "
+        "și poate fi folosit o singură dată.</p>"
+        "<p style=\"font-size:13px; color:#5c5e66;\">Dacă nu ai cerut acest email, "
+        "îl poți ignora în siguranță — contul tău rămâne neschimbat.</p>"
+    )
+    html = render_email(
+        preheader="Linkul tău de conectare HaiHui – Storage",
+        heading="Conectează-te la contul tău",
+        body_html=body_html,
+        locale="ro",
+        cta_label="Conectează-te",
+        cta_url=link,
     )
     await send_email(
         db,
         to=body.email,
-        subject="Your HaiHui login link",
+        subject="Linkul tău de conectare — HaiHui Storage",
         html=html,
         template="magic_link",
     )
