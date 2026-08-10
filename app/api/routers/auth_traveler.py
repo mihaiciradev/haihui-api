@@ -30,7 +30,7 @@ async def request_magic_link(body: MagicLinkRequest, request: Request, db: DbSes
     expires_at = datetime.now(UTC) + timedelta(minutes=settings.magic_link_ttl_minutes)
     db.add(MagicLinkToken(email=body.email, token_hash=hashed, expires_at=expires_at))
 
-    link = f"{settings.public_base_url}/auth/verify?token={raw}"
+    link = f"{settings.public_base_url}/login/verify?token={raw}"
     body_html = (
         "<p>Salut!</p>"
         "<p>Apasă butonul de mai jos pentru a te conecta la contul tău HaiHui – Storage. "
