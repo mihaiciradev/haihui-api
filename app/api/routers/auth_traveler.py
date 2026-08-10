@@ -37,7 +37,7 @@ async def request_magic_link(body: MagicLinkRequest, request: Request, db: DbSes
         f"Linkul este valabil <strong>{settings.magic_link_ttl_minutes} minute</strong> "
         "și poate fi folosit o singură dată.</p>"
         "<p style=\"font-size:13px; color:#5c5e66;\">Dacă nu ai cerut acest email, "
-        "îl poți ignora în siguranță — contul tău rămâne neschimbat.</p>"
+        "îl poți ignora în siguranță. Contul tău rămâne neschimbat.</p>"
     )
     html = render_email(
         preheader="Linkul tău de conectare HaiHui – Storage",
@@ -50,7 +50,7 @@ async def request_magic_link(body: MagicLinkRequest, request: Request, db: DbSes
     await send_email(
         db,
         to=body.email,
-        subject="Linkul tău de conectare — HaiHui Storage",
+        subject="Linkul tău de conectare pentru HaiHui Storage",
         html=html,
         template="magic_link",
     )
