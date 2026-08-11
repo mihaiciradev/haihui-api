@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routers import (
+    about,
     admin_events,
     admin_locations,
     auth_admin,
@@ -42,6 +43,7 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
+app.include_router(about.router)
 app.include_router(auth_traveler.router)
 app.include_router(auth_staff.router)
 app.include_router(auth_staff.me_router)
