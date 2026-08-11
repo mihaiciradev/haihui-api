@@ -8,7 +8,9 @@ from app.api.routers import (
     auth_admin,
     auth_staff,
     auth_traveler,
+    bookings,
     cities,
+    locations,
     partner_location,
 )
 from app.config import get_settings
@@ -47,6 +49,8 @@ app.include_router(admin_locations.router)
 app.include_router(admin_locations.staff_router)
 app.include_router(partner_location.router)
 app.include_router(cities.router)
+app.include_router(locations.router)
+app.include_router(bookings.router)
 
 
 @app.get("/healthz")
