@@ -2,22 +2,24 @@ import random
 import string
 from datetime import date, timedelta
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.api.deps import DbSession
+from app.api.deps import DbSession, TravelerIdentity, get_current_traveler
 from app.api.routers.locations import _current_prices
 from app.config import get_settings
 from app.core.email import send_email
 from app.core.email_templates import render_email
 from app.core.events import write_event
 from app.core.http import client_ip
+from app.core.qr import generate_qr_png
 from app.core.rate_limit import check_rate_limit
 from app.core.security import generate_opaque_token, hash_opaque_token
 from app.models.booking import Booking, BookingItem, BookingQrToken
 from app.models.enums import ActorType, BookingStatus, LocationStatus
 from app.models.location import Location, LocationItemType, LocationOverride
+from app.models.user import User
 from app.schemas.booking import (
     BookingCreateRequest,
     BookingCreateResponse,
@@ -62,16 +64,29 @@ async def _is_location_open(db: DbSession, location_id, storage_date: date) -> b
 
 @router.post("", response_model=BookingCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_booking(
-    body: BookingCreateRequest, request: Request, db: DbSession
+    body: BookingCreateRequest,
+    request: Request,
+    db: DbSession,
+    identity: TravelerIdentity = Depends(get_current_traveler),  # noqa: B008
 ) -> BookingCreateResponse:
-    """Guest checkout, no auth required (§3.1). Payment is not wired up yet
-    -- bookings are confirmed immediately on creation rather than starting
-    in pending_payment, by explicit product decision. Capacity is enforced
-    race-safely via a row lock on each requested LocationItemType (§5.4).
+    """Requires a verified traveler session (magic link) -- by design this
+    is asked for at finalize time, not before item selection, so travelers
+    can browse and pick items freely and only prove email ownership once
+    they're ready to actually book. The verified email is reused as the
+    booking's guest_email so travelers are never asked for it twice.
+    Payment is not wired up yet -- bookings are confirmed immediately on
+    creation rather than starting in pending_payment, by explicit product
+    decision. Capacity is enforced race-safely via a row lock on each
+    requested LocationItemType (§5.4).
     """
     check_rate_limit(
         f"booking-create:ip:{client_ip(request)}", max_attempts=20, window_seconds=3600
     )
+
+    user_result = await db.execute(select(User).where(User.id == identity.user_id))
+    user = user_result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired")
 
     today = date.today()
     if body.storage_date < today:
@@ -141,7 +156,8 @@ async def create_booking(
 
     booking = Booking(
         code=code,
-        guest_email=body.guest_email,
+        user_id=user.id,
+        guest_email=user.email,
         guest_phone=body.guest_phone,
         location_id=location.id,
         storage_date=body.storage_date,
@@ -180,7 +196,7 @@ async def create_booking(
 
     await write_event(
         db,
-        actor_type=ActorType.user if booking.user_id else ActorType.system,
+        actor_type=ActorType.user,
         actor_id=booking.user_id,
         entity_type="booking",
         entity_id=booking.id,
@@ -189,7 +205,9 @@ async def create_booking(
         ip=client_ip(request),
     )
 
-    await _send_confirmation_email(db, booking, location, raw_token, items_out)
+    settings = get_settings()
+    qr_url = f"{settings.api_base_url}/bookings/{raw_token}/qr.png"
+    await _send_confirmation_email(db, booking, location, raw_token, qr_url, items_out)
 
     try:
         await db.commit()
@@ -202,6 +220,7 @@ async def create_booking(
     return BookingCreateResponse(
         code=booking.code,
         booking_token=raw_token,
+        qr_url=qr_url,
         status=booking.status.value,
         storage_date=booking.storage_date.isoformat(),
         amount_total=float(booking.amount_total),
@@ -210,7 +229,24 @@ async def create_booking(
     )
 
 
-async def _send_confirmation_email(db, booking, location, raw_token, items_out) -> None:
+@router.get("/{token}/qr.png")
+async def get_booking_qr(token: str, db: DbSession) -> Response:
+    """The staff-facing / traveler-facing scannable QR (§5.1) -- encodes the
+    same permanent booking link as the CTA button, so scanning it lands on
+    the same booking page a traveler would reach by clicking the email link.
+    """
+    token_hash = hash_opaque_token(token)
+    result = await db.execute(select(BookingQrToken).where(BookingQrToken.token_hash == token_hash))
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Booking not found")
+
+    settings = get_settings()
+    link = f"{settings.public_base_url}/booking/{token}"
+    png = generate_qr_png(link)
+    return Response(content=png, media_type="image/png")
+
+
+async def _send_confirmation_email(db, booking, location, raw_token, qr_url, items_out) -> None:
     settings = get_settings()
     link = f"{settings.public_base_url}/booking/{raw_token}"
     items_lines = "".join(
@@ -225,6 +261,8 @@ async def _send_confirmation_email(db, booking, location, raw_token, items_out) 
         f"<ul style=\"padding-left:18px;\">{items_lines}</ul>"
         f"<p><strong>Total: {float(booking.amount_total):.2f} RON</strong></p>"
         "<p>Arată codul QR de mai jos la sosire.</p>"
+        f"<p style=\"text-align:center;\"><img src=\"{qr_url}\" alt=\"Cod QR rezervare\" "
+        "width=\"180\" height=\"180\" style=\"width:180px; height:180px;\"></p>"
     )
     html = render_email(
         preheader=f"Rezervarea ta {booking.code} este confirmată",
@@ -237,7 +275,7 @@ async def _send_confirmation_email(db, booking, location, raw_token, items_out) 
     await send_email(
         db,
         to=booking.guest_email,
-        subject=f"Rezervare confirmată {booking.code} — HaiHui Storage",
+        subject=f"Rezervare confirmată {booking.code} - HaiHui Storage",
         html=html,
         template="booking_confirmation",
         related_booking_id=booking.id,
@@ -270,8 +308,10 @@ async def get_booking(token: str, db: DbSession) -> BookingDetail:
         for i in items_result.scalars().all()
     ]
 
+    settings = get_settings()
     return BookingDetail(
         code=booking.code,
+        qr_url=f"{settings.api_base_url}/bookings/{token}/qr.png",
         status=booking.status.value,
         storage_date=booking.storage_date.isoformat(),
         amount_total=float(booking.amount_total),

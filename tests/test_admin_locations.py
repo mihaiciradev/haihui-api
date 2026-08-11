@@ -340,6 +340,60 @@ async def test_rotate_token_invalidates_old_and_issues_new(client, db):
     assert new_roster.status_code == 200
 
 
+async def test_admin_location_bookings_requires_admin_session(client):
+    resp = await client.get(f"/admin/locations/{NIL_UUID}/bookings")
+    assert resp.status_code == 401
+
+
+async def test_admin_location_bookings_rejects_unknown_location(client, db):
+    await _create_admin_and_login(client, db)
+    resp = await client.get(f"/admin/locations/{NIL_UUID}/bookings")
+    assert resp.status_code == 404
+
+
+async def test_admin_location_bookings_returns_created_booking(client, db):
+    from datetime import date, timedelta
+
+    from app.core.security import generate_opaque_token
+    from app.models.location import PriceListEntry
+    from app.models.magic_link import MagicLinkToken
+
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    db.add(PriceListEntry(item_type="bag", price_ron=16.0, valid_from=date.today()))
+    await db.commit()
+
+    raw, hashed = generate_opaque_token()
+    db.add(
+        MagicLinkToken(
+            email="traveler@example.com",
+            token_hash=hashed,
+            expires_at=datetime.now(UTC) + timedelta(minutes=15),
+        )
+    )
+    await db.commit()
+    await client.post("/auth/magic-link/verify", json={"token": raw})
+
+    booking = await client.post(
+        "/bookings",
+        json={
+            "location_slug": "suvenire-test",
+            "storage_date": (date.today() + timedelta(days=1)).isoformat(),
+            "items": [{"item_type": "bag", "qty": 1}],
+            "guest_phone": "+40700000000",
+        },
+    )
+    assert booking.status_code == 201
+
+    resp = await client.get(f"/admin/locations/{created['id']}/bookings")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["code"] == booking.json()["code"]
+
+
 async def test_rotate_token_rejects_unknown_location(client, db):
     await _create_admin_and_login(client, db)
     resp = await client.post(f"/admin/locations/{NIL_UUID}/rotate-token")

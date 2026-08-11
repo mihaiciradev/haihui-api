@@ -1,6 +1,6 @@
 from datetime import date
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.enums import ItemType, Locale
 
@@ -17,7 +17,6 @@ class BookingCreateRequest(BaseModel):
     location_slug: str = Field(min_length=1, max_length=255)
     storage_date: date
     items: list[BookingItemRequest] = Field(min_length=1)
-    guest_email: EmailStr
     guest_phone: str = Field(min_length=5, max_length=32)
     locale: Locale = Locale.ro
 
@@ -44,6 +43,7 @@ class BookingItemOut(BaseModel):
 class BookingCreateResponse(BaseModel):
     code: str
     booking_token: str
+    qr_url: str
     status: str
     storage_date: str
     amount_total: float
@@ -53,6 +53,7 @@ class BookingCreateResponse(BaseModel):
 
 class BookingDetail(BaseModel):
     code: str
+    qr_url: str
     status: str
     storage_date: str
     amount_total: float
@@ -61,4 +62,17 @@ class BookingDetail(BaseModel):
     location_name: str
     location_address: str
     location_slug: str
+    created_at: str
+
+
+class PartnerBookingOut(BaseModel):
+    id: str
+    code: str
+    status: str
+    storage_date: str
+    guest_email: str
+    guest_phone: str
+    amount_total: float
+    currency: str
+    items: list[BookingItemOut]
     created_at: str

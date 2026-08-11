@@ -55,6 +55,7 @@ class Settings(BaseSettings):
 
     # App
     public_base_url: str = Field(default="http://localhost:3000", alias="PUBLIC_BASE_URL")
+    api_base_url: str = Field(default="http://localhost:8080", alias="API_BASE_URL")
     timezone_name: str = Field(default="Europe/Bucharest", alias="APP_TIMEZONE")
 
     @property

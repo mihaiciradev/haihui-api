@@ -1,8 +1,9 @@
 import asyncio
-from datetime import date, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 from sqlalchemy import select
 
+from app.core.security import generate_opaque_token
 from app.models.city import City
 from app.models.enums import ItemType, LocationStatus
 from app.models.location import (
@@ -12,6 +13,7 @@ from app.models.location import (
     LocationOverride,
     PriceListEntry,
 )
+from app.models.magic_link import MagicLinkToken
 
 
 async def _get_or_create_city(db, slug="brasov") -> City:
@@ -67,14 +69,39 @@ def _payload(location_slug, storage_date, qty=1, item_type="bag"):
         "location_slug": location_slug,
         "storage_date": storage_date.isoformat(),
         "items": [{"item_type": item_type, "qty": qty}],
-        "guest_email": "traveler@example.com",
         "guest_phone": "+40700000000",
     }
+
+
+async def _login_traveler(client, db, email="traveler@example.com"):
+    """Bookings require a verified traveler session -- login is deferred to
+    finalize time (§ product decision), so every booking test must first
+    prove email ownership via the same magic-link flow a real traveler
+    would use, rather than posting a booking anonymously.
+    """
+    raw, hashed = generate_opaque_token()
+    db.add(
+        MagicLinkToken(
+            email=email, token_hash=hashed, expires_at=datetime.now(UTC) + timedelta(minutes=15)
+        )
+    )
+    await db.commit()
+    resp = await client.post("/auth/magic-link/verify", json={"token": raw})
+    assert resp.status_code == 200
+
+
+async def test_create_booking_requires_traveler_session(client, db):
+    location = await _seed_bookable_location(db)
+    tomorrow = date.today() + timedelta(days=1)
+
+    resp = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    assert resp.status_code == 401
 
 
 async def test_create_booking_happy_path(client, db):
     location = await _seed_bookable_location(db)
     tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
 
     resp = await client.post("/bookings", json=_payload(location.slug, tomorrow))
     assert resp.status_code == 201
@@ -83,11 +110,13 @@ async def test_create_booking_happy_path(client, db):
     assert body["amount_total"] == 16.0
     assert len(body["booking_token"]) >= 16
     assert body["code"].startswith("HH-")
+    assert body["qr_url"].endswith(f"/bookings/{body['booking_token']}/qr.png")
 
 
 async def test_create_booking_rejects_past_date(client, db):
     location = await _seed_bookable_location(db)
     yesterday = date.today() - timedelta(days=1)
+    await _login_traveler(client, db)
 
     resp = await client.post("/bookings", json=_payload(location.slug, yesterday))
     assert resp.status_code == 400
@@ -96,12 +125,14 @@ async def test_create_booking_rejects_past_date(client, db):
 async def test_create_booking_rejects_too_far_ahead(client, db):
     location = await _seed_bookable_location(db)
     too_far = date.today() + timedelta(days=32)
+    await _login_traveler(client, db)
 
     resp = await client.post("/bookings", json=_payload(location.slug, too_far))
     assert resp.status_code == 400
 
 
-async def test_create_booking_rejects_unknown_location(client):
+async def test_create_booking_rejects_unknown_location(client, db):
+    await _login_traveler(client, db)
     resp = await client.post(
         "/bookings", json=_payload("does-not-exist", date.today() + timedelta(days=1))
     )
@@ -111,6 +142,7 @@ async def test_create_booking_rejects_unknown_location(client):
 async def test_create_booking_rejects_unaccepted_item_type(client, db):
     location = await _seed_bookable_location(db, item_types=(ItemType.bag,))
     tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
 
     resp = await client.post(
         "/bookings", json=_payload(location.slug, tomorrow, item_type="trolley")
@@ -123,6 +155,7 @@ async def test_create_booking_rejects_when_location_closed_that_day(client, db):
     target = date.today() + timedelta(days=1)
     db.add(LocationOverride(location_id=location.id, date=target, closed=True, created_by="admin"))
     await db.commit()
+    await _login_traveler(client, db)
 
     resp = await client.post("/bookings", json=_payload(location.slug, target))
     assert resp.status_code == 400
@@ -131,6 +164,7 @@ async def test_create_booking_rejects_when_location_closed_that_day(client, db):
 async def test_create_booking_rejects_duplicate_item_type_in_request(client, db):
     location = await _seed_bookable_location(db)
     tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
     payload = _payload(location.slug, tomorrow)
     payload["items"] = [{"item_type": "bag", "qty": 1}, {"item_type": "bag", "qty": 2}]
 
@@ -141,6 +175,7 @@ async def test_create_booking_rejects_duplicate_item_type_in_request(client, db)
 async def test_create_booking_rejects_over_capacity(client, db):
     location = await _seed_bookable_location(db, daily_capacity=2)
     tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
 
     first = await client.post("/bookings", json=_payload(location.slug, tomorrow, qty=2))
     assert first.status_code == 201
@@ -152,6 +187,7 @@ async def test_create_booking_rejects_over_capacity(client, db):
 async def test_get_booking_by_token(client, db):
     location = await _seed_bookable_location(db)
     tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
 
     created = await client.post("/bookings", json=_payload(location.slug, tomorrow))
     token = created.json()["booking_token"]
@@ -162,10 +198,30 @@ async def test_get_booking_by_token(client, db):
     assert body["code"] == created.json()["code"]
     assert body["location_name"] == "Bookable Host"
     assert body["items"][0]["item_type"] == "bag"
+    assert body["qr_url"].endswith(f"/bookings/{token}/qr.png")
 
 
 async def test_get_booking_404_unknown_token(client):
     resp = await client.get("/bookings/totally-bogus-token")
+    assert resp.status_code == 404
+
+
+async def test_get_booking_qr_png(client, db):
+    location = await _seed_bookable_location(db)
+    tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
+
+    created = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    token = created.json()["booking_token"]
+
+    resp = await client.get(f"/bookings/{token}/qr.png")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"
+    assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+async def test_get_booking_qr_png_404_unknown_token(client):
+    resp = await client.get("/bookings/totally-bogus-token/qr.png")
     assert resp.status_code == 404
 
 
@@ -177,6 +233,7 @@ async def test_capacity_race_exactly_one_wins_last_slot(client, db):
     """
     location = await _seed_bookable_location(db, daily_capacity=1)
     tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
 
     results = await asyncio.gather(
         *[client.post("/bookings", json=_payload(location.slug, tomorrow)) for _ in range(5)]

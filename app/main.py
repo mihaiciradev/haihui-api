@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routers import (
+    admin_events,
     admin_locations,
     auth_admin,
     auth_staff,
@@ -11,6 +12,7 @@ from app.api.routers import (
     bookings,
     cities,
     locations,
+    partner_bookings,
     partner_location,
 )
 from app.config import get_settings
@@ -47,7 +49,9 @@ app.include_router(auth_admin.router)
 app.include_router(auth_admin.me_router)
 app.include_router(admin_locations.router)
 app.include_router(admin_locations.staff_router)
+app.include_router(admin_events.router)
 app.include_router(partner_location.router)
+app.include_router(partner_bookings.router)
 app.include_router(cities.router)
 app.include_router(locations.router)
 app.include_router(bookings.router)

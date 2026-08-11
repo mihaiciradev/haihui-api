@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 
 from app.api.deps import AdminIdentity, DbSession, get_current_admin
+from app.api.routers.partner_bookings import list_location_bookings
 from app.core.events import write_event
 from app.core.http import client_ip
 from app.core.security import generate_opaque_token, hash_secret
@@ -14,6 +15,7 @@ from app.models.city import City
 from app.models.enums import ActorType, LocationStatus, StaffRole
 from app.models.location import Location, LocationHours, LocationItemType
 from app.models.staff import LocationLoginToken, StaffMember
+from app.schemas.booking import PartnerBookingOut
 from app.schemas.location import (
     DayHours,
     LocationCreateRequest,
@@ -280,3 +282,19 @@ async def rotate_location_token(
     )
     await db.commit()
     return TokenRotateResponse(location_login_token=raw_token)
+
+
+@router.get("/{location_id}/bookings", response_model=list[PartnerBookingOut])
+async def admin_list_location_bookings(
+    location_id: uuid.UUID,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> list[PartnerBookingOut]:
+    """Same data the location's own partner dashboard sees, surfaced to
+    admin so support/ops can look into a specific shop without needing its
+    login PIN.
+    """
+    location_result = await db.execute(select(Location.id).where(Location.id == location_id))
+    if location_result.scalar_one_or_none() is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
+    return await list_location_bookings(db, location_id)
