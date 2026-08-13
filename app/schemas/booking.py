@@ -76,3 +76,12 @@ class PartnerBookingOut(BaseModel):
     currency: str
     items: list[BookingItemOut]
     created_at: str
+    checked_in_at: str | None
+    checked_out_at: str | None
+    photo_count: int
+
+
+class BagPhotoOut(BaseModel):
+    id: str
+    url: str
+    taken_at: str

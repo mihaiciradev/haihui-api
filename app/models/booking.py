@@ -42,6 +42,14 @@ class Booking(Base, UUIDPKMixin, TimestampMixin):
     traveler_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     kept_overnight: Mapped[bool] = mapped_column(default=False, nullable=False)
 
+    checked_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    checked_in_staff_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("staff_members.id"), nullable=True
+    )
+    checked_out_staff_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("staff_members.id"), nullable=True
+    )
+
 
 class BookingItem(Base, UUIDPKMixin):
     __tablename__ = "booking_items"
