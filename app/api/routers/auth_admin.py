@@ -118,6 +118,7 @@ async def admin_totp_verify(
             entity_type="user",
             entity_id=admin.id,
             action="admin_totp_failed",
+            payload={"email": admin.email},
             ip=client_ip(request),
         )
         await db.commit()
@@ -144,6 +145,7 @@ async def admin_totp_verify(
         entity_type="user",
         entity_id=admin.id,
         action="admin_login",
+        payload={"email": admin.email},
         ip=client_ip(request),
     )
     await db.commit()

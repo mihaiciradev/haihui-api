@@ -94,6 +94,7 @@ async def verify_magic_link(
         entity_type="user",
         entity_id=user.id,
         action="magic_link_login",
+        payload={"email": user.email},
         ip=client_ip(request),
     )
 

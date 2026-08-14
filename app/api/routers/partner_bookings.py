@@ -12,6 +12,7 @@ from app.core.security import hash_opaque_token
 from app.core.storage import StorageNotConfigured, presigned_get_url, upload_bytes
 from app.models.booking import BagPhoto, Booking, BookingItem, BookingQrToken
 from app.models.enums import ActorType, BookingStatus
+from app.models.location import Location
 from app.schemas.booking import BagPhotoOut, BookingItemOut, PartnerBookingOut
 
 router = APIRouter(prefix="/partner", tags=["partner-bookings"])
@@ -95,6 +96,25 @@ async def _get_scoped_booking(
     return booking
 
 
+async def _event_payload(db: DbSession, booking: Booking, location_id: uuid.UUID) -> dict:
+    """Common context for booking-action audit events -- enough for the
+    admin log to render a full sentence without a follow-up lookup.
+    """
+    location_result = await db.execute(select(Location.name).where(Location.id == location_id))
+    items_result = await db.execute(
+        select(BookingItem.item_type, BookingItem.qty).where(BookingItem.booking_id == booking.id)
+    )
+    return {
+        "code": booking.code,
+        "location_id": str(location_id),
+        "location_name": location_result.scalar_one_or_none(),
+        "guest_email": booking.guest_email,
+        "items": [
+            {"item_type": item_type.value, "qty": qty} for item_type, qty in items_result.all()
+        ],
+    }
+
+
 @router.get("/bookings", response_model=list[PartnerBookingOut])
 async def get_partner_bookings(
     db: DbSession, identity: StaffIdentity = Depends(get_current_staff)  # noqa: B008
@@ -171,7 +191,7 @@ async def check_in_booking(
         entity_type="booking",
         entity_id=booking.id,
         action="booking_checked_in",
-        payload={"code": booking.code},
+        payload=await _event_payload(db, booking, identity.location_id),
         ip=client_ip(request),
     )
     await db.commit()
@@ -203,7 +223,7 @@ async def check_out_booking(
         entity_type="booking",
         entity_id=booking.id,
         action="booking_checked_out",
-        payload={"code": booking.code},
+        payload=await _event_payload(db, booking, identity.location_id),
         ip=client_ip(request),
     )
     await db.commit()
@@ -259,6 +279,11 @@ async def upload_bag_photo(
         entity_type="booking",
         entity_id=booking.id,
         action="bag_photo_uploaded",
+        payload={
+            "code": booking.code,
+            "location_id": str(identity.location_id),
+            "size_bytes": len(data),
+        },
         ip=client_ip(request),
     )
     await db.commit()

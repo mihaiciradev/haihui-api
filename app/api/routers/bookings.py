@@ -201,7 +201,14 @@ async def create_booking(
         entity_type="booking",
         entity_id=booking.id,
         action="booking_created",
-        payload={"location_id": str(location.id), "storage_date": body.storage_date.isoformat()},
+        payload={
+            "code": booking.code,
+            "location_id": str(location.id),
+            "location_name": location.name,
+            "storage_date": body.storage_date.isoformat(),
+            "guest_email": user.email,
+            "items": [{"item_type": i.item_type, "qty": i.qty} for i in items_out],
+        },
         ip=client_ip(request),
     )
 

@@ -115,6 +115,7 @@ async def staff_login(
             entity_type="staff_member",
             entity_id=staff.id,
             action="pin_login_failed",
+            payload={"staff_name": staff.name, "location_id": str(staff.location_id)},
             ip=client_ip(request),
         )
         await db.commit()
@@ -133,6 +134,7 @@ async def staff_login(
         entity_type="staff_member",
         entity_id=staff.id,
         action="login",
+        payload={"staff_name": staff.name, "location_id": str(staff.location_id)},
         ip=client_ip(request),
     )
 

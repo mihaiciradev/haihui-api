@@ -184,8 +184,9 @@ async def add_staff(
     businesses need more than one staff member so scans stay attributable
     to a specific person (§3.2), hence this separate endpoint.
     """
-    location_result = await db.execute(select(Location.id).where(Location.id == location_id))
-    if location_result.scalar_one_or_none() is None:
+    location_result = await db.execute(select(Location).where(Location.id == location_id))
+    location = location_result.scalar_one_or_none()
+    if location is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
 
     staff = StaffMember(
@@ -204,7 +205,12 @@ async def add_staff(
         entity_type="staff_member",
         entity_id=staff.id,
         action="staff_added",
-        payload={"location_id": str(location_id), "role": body.role.value},
+        payload={
+            "location_id": str(location_id),
+            "location_name": location.name,
+            "staff_name": staff.name,
+            "role": body.role.value,
+        },
         ip=client_ip(request),
     )
     await db.commit()
@@ -238,6 +244,7 @@ async def reset_staff_pin(
         entity_type="staff_member",
         entity_id=staff.id,
         action="pin_reset",
+        payload={"staff_name": staff.name, "location_id": str(staff.location_id)},
         ip=client_ip(request),
     )
     await db.commit()
@@ -254,8 +261,9 @@ async def rotate_location_token(
     leaks'. Revokes every currently-active token for the location and issues
     a fresh one -- the old QR card stops working the moment this runs.
     """
-    location_result = await db.execute(select(Location.id).where(Location.id == location_id))
-    if location_result.scalar_one_or_none() is None:
+    location_result = await db.execute(select(Location).where(Location.id == location_id))
+    location = location_result.scalar_one_or_none()
+    if location is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
 
     active_tokens = await db.execute(
@@ -278,6 +286,7 @@ async def rotate_location_token(
         entity_type="location",
         entity_id=location_id,
         action="login_token_rotated",
+        payload={"location_name": location.name},
         ip=client_ip(request),
     )
     await db.commit()
