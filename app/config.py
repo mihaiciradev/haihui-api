@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     r2_access_key_id: str = Field(default="", alias="R2_ACCESS_KEY_ID")
     r2_secret_access_key: str = Field(default="", alias="R2_SECRET_ACCESS_KEY")
     r2_bucket: str = Field(default="", alias="R2_BUCKET")
+    r2_endpoint_url: str = Field(
+        default="",
+        alias="R2_ENDPOINT_URL",
+        description="Overrides the default account-id endpoint. Needed for "
+        "jurisdiction-restricted buckets (e.g. EU), which are only reachable "
+        "at a jurisdiction-specific hostname.",
+    )
 
     # Email (Resend)
     resend_api_key: str = Field(default="", alias="RESEND_API_KEY")

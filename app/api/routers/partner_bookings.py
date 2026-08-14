@@ -247,6 +247,7 @@ async def upload_bag_photo(
         taken_by_staff_id=identity.staff_id,
         taken_at=datetime.now(UTC),
         sha256=hashlib.sha256(data).hexdigest(),
+        size_bytes=len(data),
     )
     db.add(bag_photo)
     await db.flush()

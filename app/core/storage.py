@@ -13,9 +13,10 @@ def _client():
     settings = get_settings()
     if not (settings.r2_account_id and settings.r2_access_key_id and settings.r2_secret_access_key):
         raise StorageNotConfigured("R2 credentials are not configured")
+    endpoint = settings.r2_endpoint_url or f"https://{settings.r2_account_id}.r2.cloudflarestorage.com"
     return boto3.client(
         "s3",
-        endpoint_url=f"https://{settings.r2_account_id}.r2.cloudflarestorage.com",
+        endpoint_url=endpoint,
         aws_access_key_id=settings.r2_access_key_id,
         aws_secret_access_key=settings.r2_secret_access_key,
         config=BotoConfig(signature_version="s3v4"),

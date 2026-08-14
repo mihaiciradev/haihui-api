@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,7 @@ from app.api.routers import (
     about,
     admin_events,
     admin_locations,
+    admin_usage,
     auth_admin,
     auth_staff,
     auth_traveler,
@@ -18,6 +20,7 @@ from app.api.routers import (
 )
 from app.config import get_settings
 from app.core.middleware import SecurityHeadersMiddleware
+from app.core.scheduler import start_scheduler, stop_scheduler
 
 logging.basicConfig(level=logging.INFO)
 settings = get_settings()
@@ -32,7 +35,15 @@ if settings.sentry_dsn:
         send_default_pii=False,
     )
 
-app = FastAPI(title="HaiHui – Storage API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if settings.env != "local":
+        start_scheduler()
+    yield
+    stop_scheduler()
+
+
+app = FastAPI(title="HaiHui – Storage API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
@@ -52,6 +63,7 @@ app.include_router(auth_admin.me_router)
 app.include_router(admin_locations.router)
 app.include_router(admin_locations.staff_router)
 app.include_router(admin_events.router)
+app.include_router(admin_usage.router)
 app.include_router(partner_location.router)
 app.include_router(partner_bookings.router)
 app.include_router(cities.router)
