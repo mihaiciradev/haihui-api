@@ -22,6 +22,7 @@ class Booking(Base, UUIDPKMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("locations.id"), nullable=False, index=True
     )
     storage_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    pickup_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     status: Mapped[BookingStatus] = mapped_column(
         default=BookingStatus.pending_payment, nullable=False, index=True
     )

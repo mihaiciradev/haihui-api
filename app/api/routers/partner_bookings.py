@@ -46,6 +46,7 @@ async def _build_partner_out(db: DbSession, bookings: list[Booking]) -> list[Par
             code=b.code,
             status=b.status.value,
             storage_date=b.storage_date.isoformat(),
+            pickup_date=b.pickup_date.isoformat(),
             guest_email=b.guest_email,
             guest_phone=b.guest_phone,
             amount_total=float(b.amount_total),

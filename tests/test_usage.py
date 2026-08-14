@@ -56,6 +56,7 @@ async def _seed_bag_photo(db, *, size_bytes: int, taken_at: datetime) -> BagPhot
         guest_phone="+40700000000",
         location_id=location.id,
         storage_date=date.today(),
+        pickup_date=date.today(),
         status=BookingStatus.stored,
         amount_total=16.0,
         currency="RON",

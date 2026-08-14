@@ -64,13 +64,16 @@ async def _seed_bookable_location(
     return location
 
 
-def _payload(location_slug, storage_date, qty=1, item_type="bag"):
-    return {
+def _payload(location_slug, storage_date, qty=1, item_type="bag", pickup_date=None):
+    payload = {
         "location_slug": location_slug,
         "storage_date": storage_date.isoformat(),
         "items": [{"item_type": item_type, "qty": qty}],
         "guest_phone": "+40700000000",
     }
+    if pickup_date is not None:
+        payload["pickup_date"] = pickup_date.isoformat()
+    return payload
 
 
 async def _login_traveler(client, db, email="traveler@example.com"):
@@ -223,6 +226,84 @@ async def test_get_booking_qr_png(client, db):
 async def test_get_booking_qr_png_404_unknown_token(client):
     resp = await client.get("/bookings/totally-bogus-token/qr.png")
     assert resp.status_code == 404
+
+
+async def test_create_booking_defaults_pickup_date_to_storage_date(client, db):
+    location = await _seed_bookable_location(db)
+    tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
+
+    resp = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["pickup_date"] == tomorrow.isoformat()
+    assert body["amount_total"] == 16.0
+
+
+async def test_create_multi_day_booking_charges_per_night(client, db):
+    location = await _seed_bookable_location(db)
+    start = date.today() + timedelta(days=1)
+    end = start + timedelta(days=2)
+    await _login_traveler(client, db)
+
+    resp = await client.post("/bookings", json=_payload(location.slug, start, pickup_date=end))
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["storage_date"] == start.isoformat()
+    assert body["pickup_date"] == end.isoformat()
+    # 3 calendar days (start, start+1, end) at 16 RON/day
+    assert body["amount_total"] == 48.0
+
+
+async def test_create_booking_rejects_pickup_before_storage(client, db):
+    location = await _seed_bookable_location(db)
+    start = date.today() + timedelta(days=2)
+    earlier = start - timedelta(days=1)
+    await _login_traveler(client, db)
+
+    resp = await client.post(
+        "/bookings", json=_payload(location.slug, start, pickup_date=earlier)
+    )
+    assert resp.status_code == 422
+
+
+async def test_create_booking_rejects_span_over_max(client, db):
+    location = await _seed_bookable_location(db)
+    start = date.today() + timedelta(days=1)
+    too_long = start + timedelta(days=20)
+    await _login_traveler(client, db)
+
+    resp = await client.post(
+        "/bookings", json=_payload(location.slug, start, pickup_date=too_long)
+    )
+    assert resp.status_code == 422
+
+
+async def test_multi_day_bookings_block_only_on_overlapping_days(client, db):
+    """A 2-capacity item: one multi-day booking uses 1 slot across days 1-3.
+    A second booking for day 4 only (no overlap) must still succeed even
+    though the first booking is still active, since day 4 isn't shared.
+    """
+    location = await _seed_bookable_location(db, daily_capacity=1)
+    day1 = date.today() + timedelta(days=1)
+    day3 = day1 + timedelta(days=2)
+    day4 = day1 + timedelta(days=3)
+    await _login_traveler(client, db)
+
+    first = await client.post(
+        "/bookings", json=_payload(location.slug, day1, pickup_date=day3)
+    )
+    assert first.status_code == 201
+
+    non_overlapping = await client.post(
+        "/bookings", json=_payload(location.slug, day4, pickup_date=day4)
+    )
+    assert non_overlapping.status_code == 201
+
+    overlapping = await client.post(
+        "/bookings", json=_payload(location.slug, day3, pickup_date=day3)
+    )
+    assert overlapping.status_code == 400
 
 
 async def test_capacity_race_exactly_one_wins_last_slot(client, db):

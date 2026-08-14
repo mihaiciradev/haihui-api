@@ -44,3 +44,18 @@ class LocationListItem(BaseModel):
     lng: float
     photos: list[str]
     from_price_ron: float | None
+
+
+class LocationSearchResult(BaseModel):
+    id: str
+    name: str
+    slug: str
+    city_slug: str
+    city_name_ro: str
+    city_name_en: str
+    address: str
+    lat: float
+    lng: float
+    photos: list[str]
+    total_price_ron: float
+    nights: int

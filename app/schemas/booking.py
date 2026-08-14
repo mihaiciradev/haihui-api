@@ -1,7 +1,8 @@
 from datetime import date
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.capacity import MAX_STORAGE_SPAN_DAYS
 from app.models.enums import ItemType, Locale
 
 
@@ -16,6 +17,9 @@ class BookingCreateRequest(BaseModel):
 
     location_slug: str = Field(min_length=1, max_length=255)
     storage_date: date
+    pickup_date: date | None = Field(
+        default=None, description="Defaults to storage_date for a same-day booking."
+    )
     items: list[BookingItemRequest] = Field(min_length=1)
     guest_phone: str = Field(min_length=5, max_length=32)
     locale: Locale = Locale.ro
@@ -33,6 +37,16 @@ class BookingCreateRequest(BaseModel):
             raise ValueError("items must not repeat the same item_type")
         return v
 
+    @model_validator(mode="after")
+    def _resolve_and_validate_pickup_date(self) -> "BookingCreateRequest":
+        if self.pickup_date is None:
+            self.pickup_date = self.storage_date
+        if self.pickup_date < self.storage_date:
+            raise ValueError("pickup_date cannot be before storage_date")
+        if (self.pickup_date - self.storage_date).days > MAX_STORAGE_SPAN_DAYS:
+            raise ValueError(f"storage span cannot exceed {MAX_STORAGE_SPAN_DAYS + 1} days")
+        return self
+
 
 class BookingItemOut(BaseModel):
     item_type: str
@@ -46,6 +60,7 @@ class BookingCreateResponse(BaseModel):
     qr_url: str
     status: str
     storage_date: str
+    pickup_date: str
     amount_total: float
     currency: str
     items: list[BookingItemOut]
@@ -56,6 +71,7 @@ class BookingDetail(BaseModel):
     qr_url: str
     status: str
     storage_date: str
+    pickup_date: str
     amount_total: float
     currency: str
     items: list[BookingItemOut]
@@ -70,6 +86,7 @@ class PartnerBookingOut(BaseModel):
     code: str
     status: str
     storage_date: str
+    pickup_date: str
     guest_email: str
     guest_phone: str
     amount_total: float

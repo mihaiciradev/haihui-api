@@ -9,16 +9,18 @@ from sqlalchemy.exc import IntegrityError
 from app.api.deps import DbSession, TravelerIdentity, get_current_traveler
 from app.api.routers.locations import _current_prices
 from app.config import get_settings
+from app.core.capacity import MAX_DAYS_AHEAD, daily_usage, date_range
 from app.core.email import send_email
 from app.core.email_templates import render_email
 from app.core.events import write_event
+from app.core.hours import is_location_open
 from app.core.http import client_ip
 from app.core.qr import generate_qr_png
 from app.core.rate_limit import check_rate_limit
 from app.core.security import generate_opaque_token, hash_opaque_token
 from app.models.booking import Booking, BookingItem, BookingQrToken
 from app.models.enums import ActorType, BookingStatus, LocationStatus
-from app.models.location import Location, LocationItemType, LocationOverride
+from app.models.location import Location, LocationItemType
 from app.models.user import User
 from app.schemas.booking import (
     BookingCreateRequest,
@@ -28,8 +30,6 @@ from app.schemas.booking import (
 )
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
-
-MAX_DAYS_AHEAD = 31
 
 
 def _generate_code() -> str:
@@ -45,21 +45,6 @@ async def _unique_code(db: DbSession) -> str:
     raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Could not allocate booking code")
 
 
-async def _is_location_open(db: DbSession, location_id, storage_date: date) -> bool:
-    """Openness for a given date is: no override, or an override that isn't
-    marked closed (§5.6 -- override beats the weekly template, and every
-    location always has all 7 weekdays populated in the weekly template).
-    """
-    result = await db.execute(
-        select(LocationOverride).where(
-            LocationOverride.location_id == location_id,
-            LocationOverride.date == storage_date,
-        )
-    )
-    override = result.scalar_one_or_none()
-    if override is not None and override.closed:
-        return False
-    return True
 
 
 @router.post("", response_model=BookingCreateResponse, status_code=status.HTTP_201_CREATED)
@@ -105,10 +90,20 @@ async def create_booking(
     if location is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
 
-    if not await _is_location_open(db, location.id, body.storage_date):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Location is closed on that date")
+    pickup_date = body.pickup_date
+    assert pickup_date is not None  # resolved by _resolve_and_validate_pickup_date
+
+    # Only drop-off and pickup days involve staff, so those are the only
+    # days that need to be open -- the location doesn't need to be open on
+    # days in between for a multi-day stay.
+    for check_date in {body.storage_date, pickup_date}:
+        if not await is_location_open(db, location.id, check_date):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, f"Location is closed on {check_date.isoformat()}"
+            )
 
     prices = await _current_prices(db)
+    nights = (pickup_date - body.storage_date).days + 1
 
     # Lock each requested item type's capacity row for the duration of the
     # transaction so concurrent bookings for the last remaining slot can't
@@ -134,24 +129,30 @@ async def create_booking(
                 status.HTTP_400_BAD_REQUEST, f"No current price for {item.item_type.value}"
             )
 
-        used_result = await db.execute(
-            select(BookingItem.qty, Booking.status)
+        # A booking occupies capacity on every day it spans, so an existing
+        # booking overlapping any part of [storage_date, pickup_date] counts
+        # against every day it actually overlaps, not just storage_date.
+        overlap_result = await db.execute(
+            select(Booking.storage_date, Booking.pickup_date, BookingItem.qty)
             .join(Booking, Booking.id == BookingItem.booking_id)
             .where(
                 Booking.location_id == location.id,
-                Booking.storage_date == body.storage_date,
                 BookingItem.item_type == item.item_type,
                 Booking.status.notin_([BookingStatus.cancelled, BookingStatus.expired]),
+                Booking.storage_date <= pickup_date,
+                Booking.pickup_date >= body.storage_date,
             )
         )
-        used = sum(qty for qty, _ in used_result.all())
-        if used + item.qty > capacity_row.daily_capacity:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"Not enough capacity for {item.item_type.value} on {body.storage_date}",
-            )
+        overlap_rows = [(s, e, qty) for s, e, qty in overlap_result.all()]
+        usage = daily_usage(overlap_rows, body.storage_date, pickup_date)
+        for day in date_range(body.storage_date, pickup_date):
+            if usage.get(day, 0) + item.qty > capacity_row.daily_capacity:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Not enough capacity for {item.item_type.value} on {day.isoformat()}",
+                )
 
-    amount_total = sum(prices[item.item_type.value] * item.qty for item in body.items)
+    amount_total = sum(prices[item.item_type.value] * item.qty * nights for item in body.items)
     code = await _unique_code(db)
 
     booking = Booking(
@@ -161,6 +162,7 @@ async def create_booking(
         guest_phone=body.guest_phone,
         location_id=location.id,
         storage_date=body.storage_date,
+        pickup_date=pickup_date,
         status=BookingStatus.confirmed,
         amount_total=amount_total,
         currency="RON",
@@ -206,6 +208,7 @@ async def create_booking(
             "location_id": str(location.id),
             "location_name": location.name,
             "storage_date": body.storage_date.isoformat(),
+            "pickup_date": pickup_date.isoformat(),
             "guest_email": user.email,
             "items": [{"item_type": i.item_type, "qty": i.qty} for i in items_out],
         },
@@ -230,6 +233,7 @@ async def create_booking(
         qr_url=qr_url,
         status=booking.status.value,
         storage_date=booking.storage_date.isoformat(),
+        pickup_date=booking.pickup_date.isoformat(),
         amount_total=float(booking.amount_total),
         currency=booking.currency,
         items=items_out,
@@ -257,13 +261,18 @@ async def _send_confirmation_email(db, booking, location, raw_token, qr_url, ite
     settings = get_settings()
     link = f"{settings.public_base_url}/booking/{raw_token}"
     items_lines = "".join(
-        f"<li>{i.qty} x {i.item_type} &mdash; {i.unit_price_snapshot:.2f} RON/zi</li>"
-        for i in items_out
+        f"<li>{i.qty} x {i.item_type} - {i.unit_price_snapshot:.2f} RON/zi</li>" for i in items_out
+    )
+    pickup_line = (
+        f"<strong>Data ridicării:</strong> {booking.pickup_date.isoformat()}<br>"
+        if booking.pickup_date != booking.storage_date
+        else ""
     )
     body_html = (
         f"<p>Rezervarea ta la <strong>{location.name}</strong> este confirmată.</p>"
         f"<p><strong>Cod rezervare:</strong> {booking.code}<br>"
         f"<strong>Data depozitării:</strong> {booking.storage_date.isoformat()}<br>"
+        f"{pickup_line}"
         f"<strong>Adresă:</strong> {location.address}</p>"
         f"<ul style=\"padding-left:18px;\">{items_lines}</ul>"
         f"<p><strong>Total: {float(booking.amount_total):.2f} RON</strong></p>"
@@ -321,6 +330,7 @@ async def get_booking(token: str, db: DbSession) -> BookingDetail:
         qr_url=f"{settings.api_base_url}/bookings/{token}/qr.png",
         status=booking.status.value,
         storage_date=booking.storage_date.isoformat(),
+        pickup_date=booking.pickup_date.isoformat(),
         amount_total=float(booking.amount_total),
         currency=booking.currency,
         items=items,
