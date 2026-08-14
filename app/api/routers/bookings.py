@@ -1,5 +1,6 @@
 import random
 import string
+import uuid
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -27,6 +28,7 @@ from app.schemas.booking import (
     BookingCreateResponse,
     BookingDetail,
     BookingItemOut,
+    MyBookingOut,
 )
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
@@ -296,6 +298,140 @@ async def _send_confirmation_email(db, booking, location, raw_token, qr_url, ite
         template="booking_confirmation",
         related_booking_id=booking.id,
     )
+
+
+@router.get("", response_model=list[MyBookingOut])
+async def list_my_bookings(
+    db: DbSession, identity: TravelerIdentity = Depends(get_current_traveler)  # noqa: B008
+) -> list[MyBookingOut]:
+    """A traveler's own booking history, most recent storage_date first --
+    the recovery path when the confirmation email/QR is lost, since every
+    booking now requires a verified session and is tied to that user_id.
+    """
+    bookings_result = await db.execute(
+        select(Booking)
+        .where(Booking.user_id == identity.user_id)
+        .order_by(Booking.storage_date.desc(), Booking.created_at.desc())
+        .limit(200)
+    )
+    bookings = bookings_result.scalars().all()
+    if not bookings:
+        return []
+
+    location_ids = {b.location_id for b in bookings}
+    locations_result = await db.execute(select(Location).where(Location.id.in_(location_ids)))
+    locations_by_id = {loc.id: loc for loc in locations_result.scalars().all()}
+
+    items_result = await db.execute(
+        select(BookingItem).where(BookingItem.booking_id.in_([b.id for b in bookings]))
+    )
+    items_by_booking: dict[uuid.UUID, list[BookingItem]] = {}
+    for item in items_result.scalars().all():
+        items_by_booking.setdefault(item.booking_id, []).append(item)
+
+    return [
+        MyBookingOut(
+            id=str(b.id),
+            code=b.code,
+            status=b.status.value,
+            storage_date=b.storage_date.isoformat(),
+            pickup_date=b.pickup_date.isoformat(),
+            amount_total=float(b.amount_total),
+            currency=b.currency,
+            items=[
+                BookingItemOut(
+                    item_type=i.item_type.value,
+                    qty=i.qty,
+                    unit_price_snapshot=float(i.unit_price_snapshot),
+                )
+                for i in items_by_booking.get(b.id, [])
+            ],
+            location_name=locations_by_id[b.location_id].name,
+            location_slug=locations_by_id[b.location_id].slug,
+            created_at=b.created_at.isoformat(),
+        )
+        for b in bookings
+    ]
+
+
+async def _send_link_email(db, booking, location, raw_token, qr_url) -> None:
+    """Re-sends a working link/QR for an existing booking -- issues a fresh
+    BookingQrToken rather than trying to recover the original raw token,
+    which was never stored (only its hash). The old token, if the traveler
+    still has it, keeps working too; there's no reason to revoke it.
+    """
+    settings = get_settings()
+    link = f"{settings.public_base_url}/booking/{raw_token}"
+    body_html = (
+        f"<p>Iată din nou linkul rezervării tale la <strong>{location.name}</strong>.</p>"
+        f"<p><strong>Cod rezervare:</strong> {booking.code}<br>"
+        f"<strong>Stare:</strong> {booking.status.value}<br>"
+        f"<strong>Data depozitării:</strong> {booking.storage_date.isoformat()}</p>"
+        f"<p style=\"text-align:center;\"><img src=\"{qr_url}\" alt=\"Cod QR rezervare\" "
+        "width=\"180\" height=\"180\" style=\"width:180px; height:180px;\"></p>"
+    )
+    html = render_email(
+        preheader=f"Linkul rezervării tale {booking.code}",
+        heading="Rezervarea ta",
+        body_html=body_html,
+        locale=booking.locale.value,
+        cta_label="Vezi rezervarea",
+        cta_url=link,
+    )
+    await send_email(
+        db,
+        to=booking.guest_email,
+        subject=f"Linkul rezervării tale {booking.code} - HaiHui Storage",
+        html=html,
+        template="booking_link_resend",
+        related_booking_id=booking.id,
+    )
+
+
+@router.post("/{booking_id}/resend")
+async def resend_booking_link(
+    booking_id: uuid.UUID,
+    request: Request,
+    db: DbSession,
+    identity: TravelerIdentity = Depends(get_current_traveler),  # noqa: B008
+) -> dict:
+    """Lost the confirmation email/QR? This re-sends it to the same
+    verified email the booking was made with -- scoped to the caller's own
+    bookings only, and rate-limited since it triggers a real email send.
+    """
+    check_rate_limit(
+        f"booking-resend:user:{identity.user_id}", max_attempts=10, window_seconds=3600
+    )
+
+    result = await db.execute(
+        select(Booking).where(Booking.id == booking_id, Booking.user_id == identity.user_id)
+    )
+    booking = result.scalar_one_or_none()
+    if booking is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Booking not found")
+
+    location_result = await db.execute(select(Location).where(Location.id == booking.location_id))
+    location = location_result.scalar_one()
+
+    raw_token, token_hash = generate_opaque_token()
+    db.add(BookingQrToken(booking_id=booking.id, token_hash=token_hash, active=True))
+
+    settings = get_settings()
+    qr_url = f"{settings.api_base_url}/bookings/{raw_token}/qr.png"
+    await _send_link_email(db, booking, location, raw_token, qr_url)
+
+    await write_event(
+        db,
+        actor_type=ActorType.user,
+        actor_id=identity.user_id,
+        entity_type="booking",
+        entity_id=booking.id,
+        action="booking_link_resent",
+        payload={"code": booking.code},
+        ip=client_ip(request),
+    )
+    await db.commit()
+    return {"status": "sent"}
 
 
 @router.get("/{token}", response_model=BookingDetail)

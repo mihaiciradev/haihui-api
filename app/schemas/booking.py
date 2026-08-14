@@ -102,3 +102,22 @@ class BagPhotoOut(BaseModel):
     id: str
     url: str
     taken_at: str
+
+
+class MyBookingOut(BaseModel):
+    """A traveler's own booking history. No booking_token/qr_url here --
+    the raw token is never stored (only its hash), so it can't be
+    redisplayed after creation. Lost the link? Use POST /bookings/{id}/resend.
+    """
+
+    id: str
+    code: str
+    status: str
+    storage_date: str
+    pickup_date: str
+    amount_total: float
+    currency: str
+    items: list[BookingItemOut]
+    location_name: str
+    location_slug: str
+    created_at: str

@@ -1,9 +1,11 @@
 import asyncio
 from datetime import UTC, date, datetime, time, timedelta
 
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app.core.security import generate_opaque_token
+from app.main import app
 from app.models.city import City
 from app.models.enums import ItemType, LocationStatus
 from app.models.location import (
@@ -304,6 +306,80 @@ async def test_multi_day_bookings_block_only_on_overlapping_days(client, db):
         "/bookings", json=_payload(location.slug, day3, pickup_date=day3)
     )
     assert overlapping.status_code == 400
+
+
+async def test_list_my_bookings_requires_session(client):
+    resp = await client.get("/bookings")
+    assert resp.status_code == 401
+
+
+async def test_list_my_bookings_returns_own_bookings_only(client, db):
+    location = await _seed_bookable_location(db)
+    tomorrow = date.today() + timedelta(days=1)
+
+    await _login_traveler(client, db, email="mine@example.com")
+    mine = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    assert mine.status_code == 201
+
+    # a different traveler's booking must not show up in the first one's history
+    await _login_traveler(client, db, email="someone-else@example.com")
+    other = await client.post(
+        "/bookings", json=_payload(location.slug, tomorrow + timedelta(days=1))
+    )
+    assert other.status_code == 201
+
+    await _login_traveler(client, db, email="mine@example.com")
+    resp = await client.get("/bookings")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["code"] == mine.json()["code"]
+    assert body[0]["location_name"] == "Bookable Host"
+    assert "booking_token" not in body[0]
+
+
+async def test_resend_booking_link_requires_session(client, db):
+    location = await _seed_bookable_location(db)
+    tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
+    created = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    assert created.status_code == 201
+    booking_id = (await client.get("/bookings")).json()[0]["id"]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as anon_client:
+        resp = await anon_client.post(f"/bookings/{booking_id}/resend")
+        assert resp.status_code == 401
+
+
+async def test_resend_booking_link_issues_working_new_qr(client, db):
+    location = await _seed_bookable_location(db)
+    tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
+    created = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    old_token = created.json()["booking_token"]
+    booking_id = (await client.get("/bookings")).json()[0]["id"]
+
+    resp = await client.post(f"/bookings/{booking_id}/resend")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "sent"
+
+    # the original link must still work -- resend only adds a new token
+    old_still_works = await client.get(f"/bookings/{old_token}")
+    assert old_still_works.status_code == 200
+
+
+async def test_resend_booking_link_rejects_other_travelers_booking(client, db):
+    location = await _seed_bookable_location(db)
+    tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db, email="owner@example.com")
+    created = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    assert created.status_code == 201
+    booking_id = (await client.get("/bookings")).json()[0]["id"]
+
+    await _login_traveler(client, db, email="intruder@example.com")
+    resp = await client.post(f"/bookings/{booking_id}/resend")
+    assert resp.status_code == 404
 
 
 async def test_capacity_race_exactly_one_wins_last_slot(client, db):
