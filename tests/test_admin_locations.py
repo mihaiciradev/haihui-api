@@ -398,3 +398,51 @@ async def test_rotate_token_rejects_unknown_location(client, db):
     await _create_admin_and_login(client, db)
     resp = await client.post(f"/admin/locations/{NIL_UUID}/rotate-token")
     assert resp.status_code == 404
+
+
+async def test_admin_overrides_requires_admin_session(client):
+    from datetime import date, timedelta
+
+    target = date.today() + timedelta(days=5)
+    resp = await client.post(
+        f"/admin/locations/{NIL_UUID}/overrides", json={"date": target.isoformat(), "closed": True}
+    )
+    assert resp.status_code == 401
+
+
+async def test_admin_overrides_rejects_unknown_location(client, db):
+    from datetime import date, timedelta
+
+    await _create_admin_and_login(client, db)
+    target = date.today() + timedelta(days=5)
+    resp = await client.post(
+        f"/admin/locations/{NIL_UUID}/overrides", json={"date": target.isoformat(), "closed": True}
+    )
+    assert resp.status_code == 404
+
+
+async def test_admin_can_set_list_and_delete_override(client, db):
+    from datetime import date, timedelta
+
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+    target = date.today() + timedelta(days=5)
+
+    resp = await client.post(
+        f"/admin/locations/{created['id']}/overrides",
+        json={"date": target.isoformat(), "closed": True},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["created_by"] == "admin"
+
+    listing = await client.get(f"/admin/locations/{created['id']}/overrides")
+    assert listing.status_code == 200
+    assert len(listing.json()) == 1
+
+    override_url = f"/admin/locations/{created['id']}/overrides/{target.isoformat()}"
+    deleted = await client.delete(override_url)
+    assert deleted.status_code == 204
+
+    listing_after = await client.get(f"/admin/locations/{created['id']}/overrides")
+    assert listing_after.json() == []

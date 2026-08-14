@@ -1,7 +1,7 @@
 import re
 import secrets
 import uuid
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
@@ -10,6 +10,7 @@ from app.api.deps import AdminIdentity, DbSession, get_current_admin
 from app.api.routers.partner_bookings import list_location_bookings
 from app.core.events import write_event
 from app.core.http import client_ip
+from app.core.location_overrides import delete_override, list_overrides, upsert_override
 from app.core.security import generate_opaque_token, hash_secret
 from app.models.city import City
 from app.models.enums import ActorType, LocationStatus, StaffRole
@@ -22,6 +23,7 @@ from app.schemas.location import (
     LocationCreateResponse,
     LocationSummary,
 )
+from app.schemas.location_override import OverrideCreateRequest, OverrideOut
 from app.schemas.staff import (
     PinResetRequest,
     StaffCreateRequest,
@@ -307,3 +309,71 @@ async def admin_list_location_bookings(
     if location_result.scalar_one_or_none() is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
     return await list_location_bookings(db, location_id)
+
+
+@router.get("/{location_id}/overrides", response_model=list[OverrideOut])
+async def admin_get_location_overrides(
+    location_id: uuid.UUID,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> list[OverrideOut]:
+    location_result = await db.execute(select(Location.id).where(Location.id == location_id))
+    if location_result.scalar_one_or_none() is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
+    return await list_overrides(db, location_id)
+
+
+@router.post(
+    "/{location_id}/overrides", response_model=OverrideOut, status_code=status.HTTP_201_CREATED
+)
+async def admin_set_location_override(
+    location_id: uuid.UUID,
+    body: OverrideCreateRequest,
+    request: Request,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> OverrideOut:
+    """Same as the owner-facing endpoint -- exists so support can set a
+    closure on a partner's behalf without needing their login PIN.
+    """
+    location_result = await db.execute(select(Location.id).where(Location.id == location_id))
+    if location_result.scalar_one_or_none() is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
+
+    result = await upsert_override(db, location_id, body, created_by="admin")
+    await write_event(
+        db,
+        actor_type=ActorType.admin,
+        actor_id=admin.admin_user_id,
+        entity_type="location",
+        entity_id=location_id,
+        action="schedule_override_set",
+        payload={"date": body.date.isoformat(), "closed": body.closed},
+        ip=client_ip(request),
+    )
+    await db.commit()
+    return result
+
+
+@router.delete("/{location_id}/overrides/{target_date}", status_code=status.HTTP_204_NO_CONTENT)
+async def admin_remove_location_override(
+    location_id: uuid.UUID,
+    target_date: date,
+    request: Request,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> None:
+    removed = await delete_override(db, location_id, target_date)
+    if not removed:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No override for that date")
+    await write_event(
+        db,
+        actor_type=ActorType.admin,
+        actor_id=admin.admin_user_id,
+        entity_type="location",
+        entity_id=location_id,
+        action="schedule_override_removed",
+        payload={"date": target_date.isoformat()},
+        ip=client_ip(request),
+    )
+    await db.commit()
