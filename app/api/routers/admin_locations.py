@@ -32,6 +32,7 @@ from app.schemas.staff import (
     PinResetRequest,
     StaffCreateRequest,
     StaffCreateResponse,
+    StaffOut,
     TokenRotateResponse,
 )
 
@@ -346,6 +347,90 @@ async def add_staff(
     )
     await db.commit()
     return StaffCreateResponse(staff_id=str(staff.id), name=staff.name, role=staff.role.value)
+
+
+@router.get("/{location_id}/staff", response_model=list[StaffOut])
+async def list_location_staff(
+    location_id: uuid.UUID,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> list[StaffOut]:
+    location_result = await db.execute(select(Location.id).where(Location.id == location_id))
+    if location_result.scalar_one_or_none() is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
+
+    result = await db.execute(
+        select(StaffMember)
+        .where(StaffMember.location_id == location_id)
+        .order_by(StaffMember.created_at)
+    )
+    return [
+        StaffOut(
+            staff_id=str(s.id),
+            name=s.name,
+            role=s.role.value,
+            is_active=s.is_active,
+            last_login_at=s.last_login_at.isoformat() if s.last_login_at else None,
+        )
+        for s in result.scalars().all()
+    ]
+
+
+@staff_router.post("/{staff_id}/deactivate", status_code=status.HTTP_204_NO_CONTENT)
+async def deactivate_staff(
+    staff_id: uuid.UUID,
+    request: Request,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> None:
+    """Revokes one staff member's access without touching the rest of the
+    location (staff who quit/were let go, without needing to rotate the
+    whole location's login QR). Takes effect immediately -- get_current_staff
+    checks is_active live, not just the session cookie.
+    """
+    result = await db.execute(select(StaffMember).where(StaffMember.id == staff_id))
+    staff = result.scalar_one_or_none()
+    if staff is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Staff member not found")
+
+    staff.is_active = False
+    await write_event(
+        db,
+        actor_type=ActorType.admin,
+        actor_id=admin.admin_user_id,
+        entity_type="staff_member",
+        entity_id=staff.id,
+        action="staff_deactivated",
+        payload={"staff_name": staff.name, "location_id": str(staff.location_id)},
+        ip=client_ip(request),
+    )
+    await db.commit()
+
+
+@staff_router.post("/{staff_id}/reactivate", status_code=status.HTTP_204_NO_CONTENT)
+async def reactivate_staff(
+    staff_id: uuid.UUID,
+    request: Request,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> None:
+    result = await db.execute(select(StaffMember).where(StaffMember.id == staff_id))
+    staff = result.scalar_one_or_none()
+    if staff is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Staff member not found")
+
+    staff.is_active = True
+    await write_event(
+        db,
+        actor_type=ActorType.admin,
+        actor_id=admin.admin_user_id,
+        entity_type="staff_member",
+        entity_id=staff.id,
+        action="staff_reactivated",
+        payload={"staff_name": staff.name, "location_id": str(staff.location_id)},
+        ip=client_ip(request),
+    )
+    await db.commit()
 
 
 @staff_router.post("/{staff_id}/reset-pin", status_code=status.HTTP_204_NO_CONTENT)

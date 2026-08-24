@@ -528,3 +528,129 @@ async def test_update_location_replaces_hours(client, db):
     body = resp.json()
     assert len(body["hours"]) == 5
     assert body["hours"][0]["open_time"] == "09:00:00"
+
+
+async def test_list_staff_requires_admin_session(client):
+    resp = await client.get(f"/admin/locations/{NIL_UUID}/staff")
+    assert resp.status_code == 401
+
+
+async def test_list_staff_rejects_unknown_location(client, db):
+    await _create_admin_and_login(client, db)
+    resp = await client.get(f"/admin/locations/{NIL_UUID}/staff")
+    assert resp.status_code == 404
+
+
+async def test_list_staff_returns_roster(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+    await client.post(
+        f"/admin/locations/{created['id']}/staff", json={"name": "New Staff", "pin": "5678"}
+    )
+
+    resp = await client.get(f"/admin/locations/{created['id']}/staff")
+    assert resp.status_code == 200
+    body = resp.json()
+    names = {s["name"]: s for s in body}
+    assert set(names) == {"Owner Test", "New Staff"}
+    assert names["Owner Test"]["is_active"] is True
+
+
+async def test_deactivate_staff_requires_admin_session(client):
+    resp = await client.post(f"/admin/staff/{NIL_UUID}/deactivate")
+    assert resp.status_code == 401
+
+
+async def test_deactivate_staff_rejects_unknown_staff(client, db):
+    await _create_admin_and_login(client, db)
+    resp = await client.post(f"/admin/staff/{NIL_UUID}/deactivate")
+    assert resp.status_code == 404
+
+
+async def test_deactivate_staff_blocks_login_and_roster(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    result = await db.execute(select(StaffMember).where(StaffMember.location_id == created["id"]))
+    owner = result.scalar_one()
+
+    resp = await client.post(f"/admin/staff/{owner.id}/deactivate")
+    assert resp.status_code == 204
+
+    roster = await client.post(
+        "/partner/auth/roster", json={"location_token": created["location_login_token"]}
+    )
+    assert roster.json()["staff"] == []
+
+    login = await client.post(
+        "/partner/auth/login",
+        json={
+            "location_token": created["location_login_token"],
+            "staff_id": str(owner.id),
+            "pin": "1234",
+        },
+    )
+    assert login.status_code == 401
+
+
+async def test_deactivate_staff_revokes_an_existing_session_immediately(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    result = await db.execute(select(StaffMember).where(StaffMember.location_id == created["id"]))
+    owner = result.scalar_one()
+
+    login = await client.post(
+        "/partner/auth/login",
+        json={
+            "location_token": created["location_login_token"],
+            "staff_id": str(owner.id),
+            "pin": "1234",
+        },
+    )
+    assert login.status_code == 200
+
+    me_before = await client.get("/partner/me")
+    assert me_before.status_code == 200
+
+    await client.post(f"/admin/staff/{owner.id}/deactivate")
+
+    me_after = await client.get("/partner/me")
+    assert me_after.status_code == 401
+
+
+async def test_reactivate_staff_requires_admin_session(client):
+    resp = await client.post(f"/admin/staff/{NIL_UUID}/reactivate")
+    assert resp.status_code == 401
+
+
+async def test_reactivate_staff_rejects_unknown_staff(client, db):
+    await _create_admin_and_login(client, db)
+    resp = await client.post(f"/admin/staff/{NIL_UUID}/reactivate")
+    assert resp.status_code == 404
+
+
+async def test_reactivate_staff_restores_login(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    result = await db.execute(select(StaffMember).where(StaffMember.location_id == created["id"]))
+    owner = result.scalar_one()
+
+    await client.post(f"/admin/staff/{owner.id}/deactivate")
+    reactivate = await client.post(f"/admin/staff/{owner.id}/reactivate")
+    assert reactivate.status_code == 204
+
+    login = await client.post(
+        "/partner/auth/login",
+        json={
+            "location_token": created["location_login_token"],
+            "staff_id": str(owner.id),
+            "pin": "1234",
+        },
+    )
+    assert login.status_code == 200

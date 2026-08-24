@@ -23,3 +23,11 @@ class PinResetRequest(BaseModel):
 
 class TokenRotateResponse(BaseModel):
     location_login_token: str
+
+
+class StaffOut(BaseModel):
+    staff_id: str
+    name: str
+    role: str
+    is_active: bool
+    last_login_at: str | None

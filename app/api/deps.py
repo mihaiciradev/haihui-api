@@ -3,11 +3,13 @@ from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import Cookie, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.core.sessions import ADMIN_COOKIE, STAFF_COOKIE, TRAVELER_COOKIE, read_session
 from app.database import get_db
+from app.models.staff import StaffMember
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
@@ -46,6 +48,7 @@ async def get_current_traveler(
 
 
 async def get_current_staff(
+    db: DbSession,
     hh_staff_session: str | None = Cookie(default=None, alias=STAFF_COOKIE),
 ) -> StaffIdentity:
     settings = get_settings()
@@ -54,8 +57,18 @@ async def get_current_staff(
     data = read_session("staff", hh_staff_session, settings.staff_session_ttl_hours * 3600)
     if not data:
         raise _unauthorized("Session expired")
+
+    # Checked live (not just decoded from the cookie) so an admin deactivating
+    # a staff member revokes access immediately, not only after the session
+    # cookie's TTL naturally expires (up to staff_session_ttl_hours later).
+    staff_id = uuid.UUID(data["staff_id"])
+    result = await db.execute(select(StaffMember.is_active).where(StaffMember.id == staff_id))
+    is_active = result.scalar_one_or_none()
+    if is_active is not True:
+        raise _unauthorized("Session expired")
+
     return StaffIdentity(
-        staff_id=uuid.UUID(data["staff_id"]),
+        staff_id=staff_id,
         location_id=uuid.UUID(data["location_id"]),
         role=data["role"],
     )
