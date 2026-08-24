@@ -9,16 +9,19 @@ from app.api.deps import DbSession, StaffIdentity, get_current_staff
 from app.core.events import write_event
 from app.core.http import client_ip
 from app.core.security import hash_opaque_token
-from app.core.storage import StorageNotConfigured, presigned_get_url, upload_bytes
+from app.core.storage import (
+    ALLOWED_IMAGE_TYPES,
+    MAX_IMAGE_BYTES,
+    StorageNotConfigured,
+    presigned_get_url,
+    upload_bytes,
+)
 from app.models.booking import BagPhoto, Booking, BookingItem, BookingQrToken
 from app.models.enums import ActorType, BookingStatus
 from app.models.location import Location
 from app.schemas.booking import BagPhotoOut, BookingItemOut, PartnerBookingOut
 
 router = APIRouter(prefix="/partner", tags=["partner-bookings"])
-
-_ALLOWED_PHOTO_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
-_MAX_PHOTO_BYTES = 8 * 1024 * 1024
 
 
 async def _build_partner_out(db: DbSession, bookings: list[Booking]) -> list[PartnerBookingOut]:
@@ -246,12 +249,12 @@ async def upload_bag_photo(
     """
     booking = await _get_scoped_booking(db, booking_id, identity.location_id)
 
-    ext = _ALLOWED_PHOTO_TYPES.get(photo.content_type or "")
+    ext = ALLOWED_IMAGE_TYPES.get(photo.content_type or "")
     if ext is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Photo must be JPEG, PNG, or WEBP")
 
     data = await photo.read()
-    if len(data) > _MAX_PHOTO_BYTES:
+    if len(data) > MAX_IMAGE_BYTES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Photo must be under 8MB")
 
     key = f"bookings/{booking.id}/{uuid.uuid4()}.{ext}"

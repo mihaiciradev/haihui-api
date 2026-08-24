@@ -248,3 +248,86 @@ async def test_closure_set_via_api_actually_blocks_booking(client, db):
         },
     )
     assert booking.status_code == 400
+
+
+async def test_photos_requires_owner_session(client):
+    resp = await client.get("/partner/location/photos")
+    assert resp.status_code == 401
+
+
+async def test_photos_rejects_non_owner_staff(client, db):
+    raw_token, owner, staff = await _seed_location_with_owner_and_staff(db)
+    login = await client.post(
+        "/partner/auth/login",
+        json={"location_token": raw_token, "staff_id": str(staff.id), "pin": "5678"},
+    )
+    assert login.status_code == 200
+
+    resp = await client.get("/partner/location/photos")
+    assert resp.status_code == 403
+
+
+async def test_photos_list_empty_by_default(client, db):
+    await _login_owner(client, db)
+    resp = await client.get("/partner/location/photos")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_photo_upload_without_storage_configured_returns_503(client, db):
+    await _login_owner(client, db)
+    resp = await client.post(
+        "/partner/location/photos",
+        files={"photo": ("shop.jpg", b"\xff\xd8\xff\xe0fake-jpeg-bytes", "image/jpeg")},
+    )
+    assert resp.status_code == 503
+
+
+async def test_photo_upload_rejects_bad_content_type(client, db):
+    await _login_owner(client, db)
+    resp = await client.post(
+        "/partner/location/photos",
+        files={"photo": ("shop.txt", b"not a photo", "text/plain")},
+    )
+    assert resp.status_code == 400
+
+
+async def test_photo_upload_rejects_when_at_photo_cap(client, db):
+    from sqlalchemy import select
+
+    from app.models.location import Location
+
+    owner, staff = await _login_owner(client, db)
+    result = await db.execute(select(Location).where(Location.id == owner.location_id))
+    location = result.scalar_one()
+    location.photos = [f"locations/{location.id}/existing-{i}.jpg" for i in range(12)]
+    await db.commit()
+
+    resp = await client.post(
+        "/partner/location/photos",
+        files={"photo": ("shop.jpg", b"\xff\xd8\xff\xe0fake-jpeg-bytes", "image/jpeg")},
+    )
+    assert resp.status_code == 400
+    assert "at most 12" in resp.json()["detail"]
+
+
+async def test_photo_delete_404_when_key_not_present(client, db):
+    await _login_owner(client, db)
+    resp = await client.delete("/partner/location/photos/locations/nope/nope.jpg")
+    assert resp.status_code == 404
+
+
+async def test_photo_delete_scoped_to_own_location(client, db):
+    from sqlalchemy import select
+
+    from app.models.location import Location
+
+    owner, staff = await _login_owner(client, db)
+    result = await db.execute(select(Location).where(Location.id == owner.location_id))
+    location = result.scalar_one()
+    # A key that looks plausible but was never actually added to this
+    # location's own photo list -- must not be deletable through it.
+    other_key = "locations/00000000-0000-0000-0000-000000000000/foo.jpg"
+
+    resp = await client.delete(f"/partner/location/photos/{other_key}")
+    assert resp.status_code == 404

@@ -7,6 +7,7 @@ from app.api.deps import DbSession
 from app.core.capacity import MAX_DAYS_AHEAD, MAX_STORAGE_SPAN_DAYS, daily_usage, date_range
 from app.core.hours import is_location_open
 from app.core.http import client_ip
+from app.core.location_photos import public_photo_urls
 from app.core.rate_limit import check_rate_limit
 from app.models.booking import Booking, BookingItem
 from app.models.city import City
@@ -180,7 +181,7 @@ async def search_locations(
                 address=location.address,
                 lat=location.lat,
                 lng=location.lng,
-                photos=list(location.photos),
+                photos=public_photo_urls(location),
                 total_price_ron=total_price,
                 nights=nights,
             )
@@ -225,7 +226,7 @@ async def get_location(slug: str, db: DbSession) -> LocationDetail:
         lng=location.lng,
         description_ro=location.description_ro,
         description_en=location.description_en,
-        photos=list(location.photos),
+        photos=public_photo_urls(location),
         status=location.status.value,
         utm_code=location.utm_code,
         google_maps_url=location.google_maps_url,
@@ -275,7 +276,7 @@ async def list_public_locations(db: DbSession, city: str | None = None) -> list[
             address=location.address,
             lat=location.lat,
             lng=location.lng,
-            photos=list(location.photos),
+            photos=public_photo_urls(location),
             from_price_ron=lowest_price,
         )
         for location, city_row in rows

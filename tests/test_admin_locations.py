@@ -317,6 +317,48 @@ async def test_reset_pin_clears_staff_lockout_but_not_location_lockout(client, d
     assert login.status_code == 200
 
 
+async def test_admin_list_photos_requires_admin_session(client):
+    resp = await client.get(f"/admin/locations/{NIL_UUID}/photos")
+    assert resp.status_code == 401
+
+
+async def test_admin_list_photos_rejects_unknown_location(client, db):
+    await _create_admin_and_login(client, db)
+    resp = await client.get(f"/admin/locations/{NIL_UUID}/photos")
+    assert resp.status_code == 404
+
+
+async def test_admin_list_photos_empty_by_default(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    resp = await client.get(f"/admin/locations/{created['id']}/photos")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_admin_photo_upload_without_storage_configured_returns_503(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    resp = await client.post(
+        f"/admin/locations/{created['id']}/photos",
+        files={"photo": ("shop.jpg", b"\xff\xd8\xff\xe0fake-jpeg-bytes", "image/jpeg")},
+    )
+    assert resp.status_code == 503
+
+
+async def test_admin_photo_delete_404_when_key_not_present(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    resp = await client.delete(f"/admin/locations/{created['id']}/photos/locations/nope/nope.jpg")
+    assert resp.status_code == 404
+
+
 async def test_rotate_token_requires_admin_session(client):
     resp = await client.post(f"/admin/locations/{NIL_UUID}/rotate-token")
     assert resp.status_code == 401

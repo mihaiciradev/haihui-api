@@ -3,7 +3,7 @@ import secrets
 import uuid
 from datetime import UTC, date, datetime, time
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy import delete, select
 
 from app.api.deps import AdminIdentity, DbSession, get_current_admin
@@ -11,7 +11,14 @@ from app.api.routers.partner_bookings import list_location_bookings
 from app.core.events import write_event
 from app.core.http import client_ip
 from app.core.location_overrides import delete_override, list_overrides, upsert_override
+from app.core.location_photos import (
+    add_location_photo,
+    public_photo_urls,
+    remove_location_photo,
+    to_photo_outs,
+)
 from app.core.security import generate_opaque_token, hash_secret
+from app.core.storage import StorageNotConfigured
 from app.models.city import City
 from app.models.enums import ActorType, LocationStatus, StaffRole
 from app.models.location import Location, LocationHours, LocationItemType
@@ -28,6 +35,7 @@ from app.schemas.location import (
     LocationUpdateRequest,
 )
 from app.schemas.location_override import OverrideCreateRequest, OverrideOut
+from app.schemas.location_photo import LocationPhotoOut
 from app.schemas.staff import (
     PinResetRequest,
     StaffCreateRequest,
@@ -278,7 +286,7 @@ async def update_location(
         lng=location.lng,
         description_ro=location.description_ro,
         description_en=location.description_en,
-        photos=list(location.photos),
+        photos=public_photo_urls(location),
         status=location.status.value,
         revenue_share_pct=location.revenue_share_pct,
         utm_code=location.utm_code,
@@ -588,6 +596,92 @@ async def admin_remove_location_override(
         entity_id=location_id,
         action="schedule_override_removed",
         payload={"date": target_date.isoformat()},
+        ip=client_ip(request),
+    )
+    await db.commit()
+
+
+async def _get_location_or_404(db: DbSession, location_id: uuid.UUID) -> Location:
+    result = await db.execute(select(Location).where(Location.id == location_id))
+    location = result.scalar_one_or_none()
+    if location is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
+    return location
+
+
+@router.get("/{location_id}/photos", response_model=list[LocationPhotoOut])
+async def admin_list_location_photos(
+    location_id: uuid.UUID,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> list[LocationPhotoOut]:
+    location = await _get_location_or_404(db, location_id)
+    try:
+        return to_photo_outs(location)
+    except StorageNotConfigured as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Photo storage is not configured yet"
+        ) from exc
+
+
+@router.post(
+    "/{location_id}/photos", response_model=LocationPhotoOut, status_code=status.HTTP_201_CREATED
+)
+async def admin_upload_location_photo(
+    location_id: uuid.UUID,
+    request: Request,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+    photo: UploadFile = File(...),  # noqa: B008
+) -> LocationPhotoOut:
+    """Same as the owner-facing endpoint -- exists so admin can set up a
+    shop's photos on their behalf without needing their login PIN.
+    """
+    location = await _get_location_or_404(db, location_id)
+    data = await photo.read()
+    try:
+        await add_location_photo(location, photo.content_type, data)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except StorageNotConfigured as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Photo storage is not configured yet"
+        ) from exc
+
+    await write_event(
+        db,
+        actor_type=ActorType.admin,
+        actor_id=admin.admin_user_id,
+        entity_type="location",
+        entity_id=location_id,
+        action="location_photo_uploaded",
+        payload={"location_name": location.name},
+        ip=client_ip(request),
+    )
+    await db.commit()
+    return to_photo_outs(location)[-1]
+
+
+@router.delete("/{location_id}/photos/{key:path}", status_code=status.HTTP_204_NO_CONTENT)
+async def admin_delete_location_photo(
+    location_id: uuid.UUID,
+    key: str,
+    request: Request,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> None:
+    location = await _get_location_or_404(db, location_id)
+    if not remove_location_photo(location, key):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Photo not found")
+
+    await write_event(
+        db,
+        actor_type=ActorType.admin,
+        actor_id=admin.admin_user_id,
+        entity_type="location",
+        entity_id=location_id,
+        action="location_photo_removed",
+        payload={"location_name": location.name},
         ip=client_ip(request),
     )
     await db.commit()
