@@ -446,3 +446,85 @@ async def test_admin_can_set_list_and_delete_override(client, db):
 
     listing_after = await client.get(f"/admin/locations/{created['id']}/overrides")
     assert listing_after.json() == []
+
+
+async def test_update_location_requires_admin_session(client):
+    resp = await client.patch(f"/admin/locations/{NIL_UUID}", json={"name": "New Name"})
+    assert resp.status_code == 401
+
+
+async def test_update_location_rejects_unknown_location(client, db):
+    await _create_admin_and_login(client, db)
+    resp = await client.patch(f"/admin/locations/{NIL_UUID}", json={"name": "New Name"})
+    assert resp.status_code == 404
+
+
+async def test_update_location_rejects_empty_body(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    resp = await client.patch(f"/admin/locations/{created['id']}", json={})
+    assert resp.status_code == 400
+
+
+async def test_update_location_changes_only_given_fields(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    resp = await client.patch(
+        f"/admin/locations/{created['id']}", json={"name": "Renamed Shop", "revenue_share_pct": 55}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "Renamed Shop"
+    assert body["revenue_share_pct"] == 55
+    # address wasn't touched -- still the value from creation
+    assert body["address"] == "Str. Test 1"
+    assert len(body["item_types"]) == 2
+
+
+async def test_update_location_replaces_item_types(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    resp = await client.patch(
+        f"/admin/locations/{created['id']}",
+        json={"item_types": [{"item_type": "oversized", "daily_capacity": 3}]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["item_types"]) == 1
+    assert body["item_types"][0]["item_type"] == "oversized"
+    assert body["item_types"][0]["daily_capacity"] == 3
+
+
+async def test_update_location_can_delist(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    resp = await client.patch(f"/admin/locations/{created['id']}", json={"status": "delisted"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "delisted"
+
+    # delisted locations disappear from public listing/detail
+    public = await client.get(f"/locations/{created['slug']}")
+    assert public.status_code == 404
+
+
+async def test_update_location_replaces_hours(client, db):
+    await _seed_city(db)
+    await _create_admin_and_login(client, db)
+    created = (await client.post("/admin/locations", json=_create_payload())).json()
+
+    new_hours = [
+        {"weekday": w, "open_time": "09:00:00", "close_time": "18:00:00"} for w in range(5)
+    ]
+    resp = await client.patch(f"/admin/locations/{created['id']}", json={"hours": new_hours})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["hours"]) == 5
+    assert body["hours"][0]["open_time"] == "09:00:00"

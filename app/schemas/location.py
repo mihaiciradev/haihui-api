@@ -2,7 +2,7 @@ from datetime import time
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.enums import ItemType
+from app.models.enums import ItemType, LocationStatus
 
 
 class ItemCapacity(BaseModel):
@@ -44,6 +44,48 @@ class LocationCreateRequest(BaseModel):
     @field_validator("item_types")
     @classmethod
     def _unique_item_types(cls, v: list[ItemCapacity]) -> list[ItemCapacity]:
+        types = [i.item_type for i in v]
+        if len(types) != len(set(types)):
+            raise ValueError("item_types must not repeat the same item_type")
+        return v
+
+    @field_validator("hours")
+    @classmethod
+    def _unique_weekdays(cls, v: list[DayHours] | None) -> list[DayHours] | None:
+        if v is None:
+            return v
+        days = [h.weekday for h in v]
+        if len(days) != len(set(days)):
+            raise ValueError("hours must not repeat the same weekday")
+        return v
+
+
+class LocationUpdateRequest(BaseModel):
+    """A partial update -- any field omitted entirely is left unchanged.
+    item_types and hours, when given, fully replace the existing set rather
+    than merging (matches how they're supplied on create).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    address: str | None = Field(default=None, min_length=1, max_length=500)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    description_ro: str | None = Field(default=None, max_length=4000)
+    description_en: str | None = Field(default=None, max_length=4000)
+    google_maps_url: str | None = Field(default=None, max_length=1000)
+    google_review_url: str | None = Field(default=None, max_length=1000)
+    revenue_share_pct: int | None = Field(default=None, ge=0, le=100)
+    status: LocationStatus | None = None
+    item_types: list[ItemCapacity] | None = Field(default=None, min_length=1)
+    hours: list[DayHours] | None = None
+
+    @field_validator("item_types")
+    @classmethod
+    def _unique_item_types(cls, v: list[ItemCapacity] | None) -> list[ItemCapacity] | None:
+        if v is None:
+            return v
         types = [i.item_type for i in v]
         if len(types) != len(set(types)):
             raise ValueError("item_types must not repeat the same item_type")

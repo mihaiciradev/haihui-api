@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, date, datetime, time
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.api.deps import AdminIdentity, DbSession, get_current_admin
 from app.api.routers.partner_bookings import list_location_bookings
@@ -19,9 +19,13 @@ from app.models.staff import LocationLoginToken, StaffMember
 from app.schemas.booking import PartnerBookingOut
 from app.schemas.location import (
     DayHours,
+    DayHoursOut,
+    ItemCapacityOut,
     LocationCreateRequest,
     LocationCreateResponse,
+    LocationProfileResponse,
     LocationSummary,
+    LocationUpdateRequest,
 )
 from app.schemas.location_override import OverrideCreateRequest, OverrideOut
 from app.schemas.staff import (
@@ -168,6 +172,131 @@ async def list_locations(
         )
         for loc, city_slug in result.all()
     ]
+
+
+@router.patch("/{location_id}", response_model=LocationProfileResponse)
+async def update_location(
+    location_id: uuid.UUID,
+    body: LocationUpdateRequest,
+    request: Request,
+    db: DbSession,
+    admin: AdminIdentity = Depends(get_current_admin),  # noqa: B008
+) -> LocationProfileResponse:
+    """Everything set at creation is otherwise permanent -- capacity, item
+    types, hours, address, revenue share, even whether the location is
+    still active. Any field omitted from the body is left unchanged;
+    item_types/hours, when given, fully replace the existing set rather
+    than merging, same as on create.
+    """
+    result = await db.execute(
+        select(Location, City.slug)
+        .join(City, City.id == Location.city_id)
+        .where(Location.id == location_id)
+    )
+    row = result.one_or_none()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Location not found")
+    location, city_slug = row
+
+    fields_set = body.model_fields_set
+    changed: list[str] = []
+    for field in (
+        "name",
+        "address",
+        "lat",
+        "lng",
+        "description_ro",
+        "description_en",
+        "google_maps_url",
+        "google_review_url",
+        "revenue_share_pct",
+        "status",
+    ):
+        if field in fields_set:
+            setattr(location, field, getattr(body, field))
+            changed.append(field)
+
+    if "item_types" in fields_set and body.item_types is not None:
+        await db.execute(
+            delete(LocationItemType).where(LocationItemType.location_id == location_id)
+        )
+        for item in body.item_types:
+            db.add(
+                LocationItemType(
+                    location_id=location_id,
+                    item_type=item.item_type,
+                    daily_capacity=item.daily_capacity,
+                )
+            )
+        changed.append("item_types")
+
+    if "hours" in fields_set and body.hours is not None:
+        await db.execute(delete(LocationHours).where(LocationHours.location_id == location_id))
+        for h in body.hours:
+            db.add(
+                LocationHours(
+                    location_id=location_id,
+                    weekday=h.weekday,
+                    open_time=h.open_time,
+                    close_time=h.close_time,
+                )
+            )
+        changed.append("hours")
+
+    if not changed:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No fields to update")
+
+    await write_event(
+        db,
+        actor_type=ActorType.admin,
+        actor_id=admin.admin_user_id,
+        entity_type="location",
+        entity_id=location_id,
+        action="location_updated",
+        payload={"location_name": location.name, "fields": changed},
+        ip=client_ip(request),
+    )
+    await db.commit()
+
+    item_types_result = await db.execute(
+        select(LocationItemType).where(LocationItemType.location_id == location_id)
+    )
+    hours_result = await db.execute(
+        select(LocationHours)
+        .where(LocationHours.location_id == location_id)
+        .order_by(LocationHours.weekday)
+    )
+
+    return LocationProfileResponse(
+        id=str(location.id),
+        name=location.name,
+        slug=location.slug,
+        city_slug=city_slug,
+        address=location.address,
+        lat=location.lat,
+        lng=location.lng,
+        description_ro=location.description_ro,
+        description_en=location.description_en,
+        photos=list(location.photos),
+        status=location.status.value,
+        revenue_share_pct=location.revenue_share_pct,
+        utm_code=location.utm_code,
+        google_maps_url=location.google_maps_url,
+        google_review_url=location.google_review_url,
+        strike_count=location.strike_count,
+        item_types=[
+            ItemCapacityOut(item_type=i.item_type.value, daily_capacity=i.daily_capacity)
+            for i in item_types_result.scalars().all()
+        ],
+        hours=[
+            DayHoursOut(
+                weekday=h.weekday,
+                open_time=h.open_time.isoformat(),
+                close_time=h.close_time.isoformat(),
+            )
+            for h in hours_result.scalars().all()
+        ],
+    )
 
 
 @router.post(
