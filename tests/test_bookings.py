@@ -382,6 +382,85 @@ async def test_resend_booking_link_rejects_other_travelers_booking(client, db):
     assert resp.status_code == 404
 
 
+async def test_cancel_booking_requires_session(client, db):
+    location = await _seed_bookable_location(db)
+    tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
+    created = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    assert created.status_code == 201
+    booking_id = (await client.get("/bookings")).json()[0]["id"]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as anon_client:
+        resp = await anon_client.post(f"/bookings/{booking_id}/cancel")
+        assert resp.status_code == 401
+
+
+async def test_cancel_booking_happy_path(client, db):
+    location = await _seed_bookable_location(db)
+    tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
+    created = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    assert created.status_code == 201
+    booking_id = (await client.get("/bookings")).json()[0]["id"]
+
+    resp = await client.post(f"/bookings/{booking_id}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "cancelled"
+
+    listing = await client.get("/bookings")
+    assert listing.json()[0]["status"] == "cancelled"
+
+
+async def test_cancel_booking_rejects_other_travelers_booking(client, db):
+    location = await _seed_bookable_location(db)
+    tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db, email="owner@example.com")
+    created = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    assert created.status_code == 201
+    booking_id = (await client.get("/bookings")).json()[0]["id"]
+
+    await _login_traveler(client, db, email="intruder@example.com")
+    resp = await client.post(f"/bookings/{booking_id}/cancel")
+    assert resp.status_code == 404
+
+
+async def test_cancel_booking_rejects_already_cancelled(client, db):
+    location = await _seed_bookable_location(db)
+    tomorrow = date.today() + timedelta(days=1)
+    await _login_traveler(client, db)
+    created = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    booking_id = (await client.get("/bookings")).json()[0]["id"]
+
+    first = await client.post(f"/bookings/{booking_id}/cancel")
+    assert first.status_code == 200
+
+    second = await client.post(f"/bookings/{booking_id}/cancel")
+    assert second.status_code == 400
+
+
+async def test_cancel_booking_frees_capacity_for_another_traveler(client, db):
+    location = await _seed_bookable_location(db, daily_capacity=1)
+    tomorrow = date.today() + timedelta(days=1)
+
+    await _login_traveler(client, db, email="first@example.com")
+    first_booking = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    assert first_booking.status_code == 201
+    booking_id = (await client.get("/bookings")).json()[0]["id"]
+
+    await _login_traveler(client, db, email="second@example.com")
+    blocked = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    assert blocked.status_code == 400
+
+    await _login_traveler(client, db, email="first@example.com")
+    cancel = await client.post(f"/bookings/{booking_id}/cancel")
+    assert cancel.status_code == 200
+
+    await _login_traveler(client, db, email="second@example.com")
+    now_fits = await client.post("/bookings", json=_payload(location.slug, tomorrow))
+    assert now_fits.status_code == 201
+
+
 async def test_capacity_race_exactly_one_wins_last_slot(client, db):
     """§5.4/§9: fire parallel bookings at the last remaining slot, exactly
     one must succeed. Requests hit the API through separate DB connections

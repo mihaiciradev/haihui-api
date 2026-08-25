@@ -300,6 +300,31 @@ async def _send_confirmation_email(db, booking, location, raw_token, qr_url, ite
     )
 
 
+def _to_my_booking_out(
+    booking: Booking, location: Location, items: list[BookingItem]
+) -> MyBookingOut:
+    return MyBookingOut(
+        id=str(booking.id),
+        code=booking.code,
+        status=booking.status.value,
+        storage_date=booking.storage_date.isoformat(),
+        pickup_date=booking.pickup_date.isoformat(),
+        amount_total=float(booking.amount_total),
+        currency=booking.currency,
+        items=[
+            BookingItemOut(
+                item_type=i.item_type.value,
+                qty=i.qty,
+                unit_price_snapshot=float(i.unit_price_snapshot),
+            )
+            for i in items
+        ],
+        location_name=location.name,
+        location_slug=location.slug,
+        created_at=booking.created_at.isoformat(),
+    )
+
+
 @router.get("", response_model=list[MyBookingOut])
 async def list_my_bookings(
     db: DbSession, identity: TravelerIdentity = Depends(get_current_traveler)  # noqa: B008
@@ -330,25 +355,8 @@ async def list_my_bookings(
         items_by_booking.setdefault(item.booking_id, []).append(item)
 
     return [
-        MyBookingOut(
-            id=str(b.id),
-            code=b.code,
-            status=b.status.value,
-            storage_date=b.storage_date.isoformat(),
-            pickup_date=b.pickup_date.isoformat(),
-            amount_total=float(b.amount_total),
-            currency=b.currency,
-            items=[
-                BookingItemOut(
-                    item_type=i.item_type.value,
-                    qty=i.qty,
-                    unit_price_snapshot=float(i.unit_price_snapshot),
-                )
-                for i in items_by_booking.get(b.id, [])
-            ],
-            location_name=locations_by_id[b.location_id].name,
-            location_slug=locations_by_id[b.location_id].slug,
-            created_at=b.created_at.isoformat(),
+        _to_my_booking_out(
+            b, locations_by_id[b.location_id], items_by_booking.get(b.id, [])
         )
         for b in bookings
     ]
@@ -432,6 +440,82 @@ async def resend_booking_link(
     )
     await db.commit()
     return {"status": "sent"}
+
+
+_CANCELLABLE_STATUSES = {BookingStatus.pending_payment, BookingStatus.confirmed}
+
+
+async def _send_cancellation_email(db, booking, location) -> None:
+    body_html = (
+        f"<p>Rezervarea ta la <strong>{location.name}</strong> a fost anulată.</p>"
+        f"<p><strong>Cod rezervare:</strong> {booking.code}<br>"
+        f"<strong>Data depozitării:</strong> {booking.storage_date.isoformat()}</p>"
+        "<p>Dacă ai nevoie în continuare de depozitare, poți face o rezervare nouă oricând.</p>"
+    )
+    html = render_email(
+        preheader=f"Rezervarea ta {booking.code} a fost anulată",
+        heading="Rezervare anulată",
+        body_html=body_html,
+        locale=booking.locale.value,
+    )
+    await send_email(
+        db,
+        to=booking.guest_email,
+        subject=f"Rezervare anulată {booking.code} - HaiHui Storage",
+        html=html,
+        template="booking_cancelled",
+        related_booking_id=booking.id,
+    )
+
+
+@router.post("/{booking_id}/cancel", response_model=MyBookingOut)
+async def cancel_booking(
+    booking_id: uuid.UUID,
+    request: Request,
+    db: DbSession,
+    identity: TravelerIdentity = Depends(get_current_traveler),  # noqa: B008
+) -> MyBookingOut:
+    """Traveler-initiated cancellation, scoped to the caller's own booking.
+    Only allowed before check-in (§5.4 handles the physical-drop-off side
+    separately) -- once a bag is actually checked in, cancelling from the
+    traveler side no longer makes sense, that's a staff-side release. A
+    cancelled booking's capacity is freed automatically: every capacity
+    query already excludes cancelled bookings.
+    """
+    result = await db.execute(
+        select(Booking).where(Booking.id == booking_id, Booking.user_id == identity.user_id)
+    )
+    booking = result.scalar_one_or_none()
+    if booking is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Booking not found")
+
+    if booking.status not in _CANCELLABLE_STATUSES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Booking cannot be cancelled from status {booking.status.value}",
+        )
+
+    booking.status = BookingStatus.cancelled
+
+    location_result = await db.execute(select(Location).where(Location.id == booking.location_id))
+    location = location_result.scalar_one()
+    items_result = await db.execute(select(BookingItem).where(BookingItem.booking_id == booking.id))
+    items = list(items_result.scalars().all())
+
+    await _send_cancellation_email(db, booking, location)
+
+    await write_event(
+        db,
+        actor_type=ActorType.user,
+        actor_id=identity.user_id,
+        entity_type="booking",
+        entity_id=booking.id,
+        action="booking_cancelled",
+        payload={"code": booking.code, "location_name": location.name},
+        ip=client_ip(request),
+    )
+    await db.commit()
+    return _to_my_booking_out(booking, location, items)
 
 
 @router.get("/{token}", response_model=BookingDetail)
